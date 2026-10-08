@@ -46,6 +46,22 @@ class InMemoryDialogStore:
         self.drafts[user_id, chat_id] = dict(draft)
 
 
+class YieldingDialogStore(InMemoryDialogStore):
+    """Уступает управление event loop перед чтением и перед записью состояния.
+
+    Без уступки оба сообщения из теста выполнялись бы подряд, и гонка не возникала бы даже без
+    блокировки в DialogService. С уступкой без блокировки оба фото прочитают WAITING_PHOTO.
+    """
+
+    async def get_state(self, user_id: int, chat_id: int) -> str | None:
+        await asyncio.sleep(0)
+        return await super().get_state(user_id, chat_id)
+
+    async def set_state(self, user_id: int, chat_id: int, state: str) -> None:
+        await asyncio.sleep(0)
+        await super().set_state(user_id, chat_id, state)
+
+
 class FakeUsers:
     """Возвращает один и тот же часовой пояс для любого пользователя."""
 
@@ -270,10 +286,11 @@ async def test_invalid_message_keeps_state_and_draft(
     assert posts.created == []
 
 
-async def test_parallel_photos_are_handled_one_at_a_time(
-    service: DialogService, store: InMemoryDialogStore
-) -> None:
-    # D11: без блокировки оба фото прошли бы как «принято». С блокировкой второе заменяет первое.
+async def test_parallel_photos_are_handled_one_at_a_time(posts: RecordingPostService) -> None:
+    # D11: без блокировки оба фото прочитали бы WAITING_PHOTO и оба получили бы «принято».
+    # YieldingDialogStore уступает управление между чтением и записью, поэтому гонка возможна.
+    store = YieldingDialogStore()
+    service = DialogService(store, user_service=FakeUsers(), post_service=posts)  # type: ignore[arg-type]
     await service.start(USER, CHAT)
 
     first, second = await asyncio.gather(
@@ -287,6 +304,26 @@ async def test_parallel_photos_are_handled_one_at_a_time(
     }
     assert store.states[USER, CHAT] == WAITING_DATETIME
     assert store.drafts[USER, CHAT]["photo_file_id"] in {"photo-a", "photo-b"}
+
+
+async def test_parallel_dates_create_one_post(posts: RecordingPostService) -> None:
+    # D11: две корректные даты подряд не создают два поста. Вторая приходит уже в IDLE и получает
+    # INVALID_MESSAGE. Без блокировки обе прочитали бы WAITING_DATETIME и создали бы два поста.
+    store = YieldingDialogStore()
+    service = DialogService(store, user_service=FakeUsers(), post_service=posts)  # type: ignore[arg-type]
+    await service.start(USER, CHAT)
+    await service.receive_photo(USER, CHAT, "photo-1")
+
+    outcomes = await asyncio.gather(
+        service.receive_text(USER, CHAT, future_date_text()),
+        service.receive_text(USER, CHAT, future_date_text()),
+    )
+
+    assert sorted(outcome.kind for outcome in outcomes) == sorted(
+        [DialogOutcomeKind.POST_CREATED, DialogOutcomeKind.INVALID_MESSAGE]
+    )
+    assert len(posts.created) == 1
+    assert store.states[USER, CHAT] == IDLE
 
 
 async def test_users_do_not_share_state(service: DialogService, store: InMemoryDialogStore) -> None:
