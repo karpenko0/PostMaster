@@ -2,23 +2,62 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-build/
-dist/
+*.egg
+.eggs/
+/build/
+/dist/
+*.whl
 .venv/
 venv/
 
-# Инструменты проверки
+# Инструменты проверки и сборки
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.tox/
+.nox/
 .coverage
+.coverage.*
 htmlcov/
 
 # Секреты и локальные данные (SPEC-023, SPEC-027).
 # .env.example намеренно не игнорируется.
 .env
-data/
+.env.*
+!.env.example
+
+# Ключи, сертификаты и файлы учётных данных
+*.pem
+*.key
+*.p12
+*.pfx
+.netrc
+.git-credentials
+/secrets/
+
+# Каталог ./data монтируется в контейнер (docker-compose.yml) и содержит базу SQLite.
+/data/
 *.db
-*.db-wal
-*.db-shm
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+
+# Логи
+/logs/
 *.log
+*.log.*
+
+# Редакторы и операционная система
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+*.rej
+.DS_Store
+Thumbs.db
+desktop.ini
