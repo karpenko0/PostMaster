@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Инструменты проверки
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Секреты и локальные данные (SPEC-023, SPEC-027).
+# .env.example намеренно не игнорируется.
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+*.log

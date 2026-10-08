@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "postmaster"
+version = "0.1.0"
+description = "Telegram-бот PostMaster: отложенные публикации фотографий"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyTelegramBotAPI>=4.37,<5",
+    "SQLAlchemy[asyncio]>=2.0,<3",
+    "aiosqlite>=0.20,<1",
+    "APScheduler>=3.11,<4",
+    "python-dotenv>=1.0,<2",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.24,<2",
+    "ruff>=0.6,<1",
+]
+
+[project.scripts]
+postmaster = "postmaster.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["postmaster*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Тексты спецификаций и планов хранятся без автоформатирования.
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.isort]
+# fake_telegram — вспомогательный модуль тестов, а не сторонняя библиотека.
+known-first-party = ["fake_telegram"]

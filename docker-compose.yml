@@ -1,0 +1,16 @@
+# Запуск PostMaster в Docker (AC-06, SPEC-028).
+# Перед запуском: cp .env.example .env и заполнить BOT_TOKEN.
+# Запуск: docker compose up -d --build. Логи: docker compose logs -f postmaster.
+services:
+  postmaster:
+    build: .
+    env_file: .env
+    # Данные SQLite хранятся на хосте и переживают пересоздание контейнера.
+    # Каталог ./data должен принадлежать пользователю uid 1000 (или быть доступен ему на запись).
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    # init передаёт SIGTERM приложению и убирает зомби-процессы.
+    init: true
+    # Время на корректную остановку Long Polling и Scheduler.
+    stop_grace_period: 30s
