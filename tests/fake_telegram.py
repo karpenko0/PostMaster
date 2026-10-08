@@ -8,6 +8,7 @@ import asyncio
 import itertools
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import parse_qsl
 
 from aiohttp import web
 
@@ -24,6 +25,22 @@ def _ok(result: Any) -> web.Response:
     return web.json_response({"ok": True, "result": result})
 
 
+async def _request_params(request: web.Request) -> dict[str, str]:
+    """Параметры из строки запроса и тела.
+
+    pyTelegramBotAPI шлёт getUpdates методом GET с телом формы. request.post() для GET
+    возвращает пустой словарь, поэтому для GET тело читается вручную. Иначе offset не доходил
+    бы до фейка, и каждое обновление доставлялось бы повторно.
+    """
+    params = dict(request.query)
+    if request.method == "GET":
+        body = await request.read()
+        params.update(parse_qsl(body.decode("utf-8"), keep_blank_values=True))
+    else:
+        params.update({key: str(value) for key, value in (await request.post()).items()})
+    return params
+
+
 @dataclass
 class FakeTelegram:
     """Fake Telegram API на 127.0.0.1 со случайным свободным портом."""
@@ -32,20 +49,41 @@ class FakeTelegram:
     reject_token: bool = False
     api_url: str = ""
     methods: list[str] = field(default_factory=list)
+    # Тексты, которые бот отправил через sendMessage: chat_id и text в виде строк.
+    sent_messages: list[dict[str, str]] = field(default_factory=list)
     get_updates_called: asyncio.Event = field(default_factory=asyncio.Event)
     update_delivered: asyncio.Event = field(default_factory=asyncio.Event)
     _pending: list[dict[str, Any]] = field(default_factory=list)
     _update_ids: itertools.count = field(default_factory=lambda: itertools.count(1))
     _runner: web.AppRunner | None = None
 
-    def add_text_message(self, text: str, chat_id: int = 42) -> None:
-        """Ставит в очередь сообщение, которое вернётся при следующем getUpdates."""
+    def add_text_message(
+        self,
+        text: str,
+        chat_id: int = 42,
+        *,
+        user_id: int | None = None,
+        username: str | None = None,
+        first_name: str = "Tester",
+    ) -> None:
+        """Ставит в очередь сообщение, которое вернётся при следующем getUpdates.
+
+        По умолчанию отправитель совпадает с чатом и не имеет username. Параметры user_id,
+        username и first_name задают отправителя явно.
+        """
         update_id = next(self._update_ids)
+        sender: dict[str, Any] = {
+            "id": chat_id if user_id is None else user_id,
+            "is_bot": False,
+            "first_name": first_name,
+        }
+        if username is not None:
+            sender["username"] = username
         message: dict[str, Any] = {
             "message_id": update_id,
             "date": 1_700_000_000,
-            "chat": {"id": chat_id, "type": "private", "first_name": "Tester"},
-            "from": {"id": chat_id, "is_bot": False, "first_name": "Tester"},
+            "chat": {"id": chat_id, "type": "private", "first_name": first_name},
+            "from": sender,
             "text": text,
         }
         if text.startswith("/"):
@@ -84,11 +122,27 @@ class FakeTelegram:
             return _ok(BOT_USER)
         if method == "getUpdates":
             return await self._get_updates(request)
+        if method == "sendMessage":
+            return await self._send_message(request)
         return _ok(True)
 
+    async def _send_message(self, request: web.Request) -> web.Response:
+        params = await _request_params(request)
+        chat_id = params.get("chat_id", "")
+        text = params.get("text", "")
+        self.sent_messages.append({"chat_id": chat_id, "text": text})
+        # Telegram возвращает отправленное сообщение. pyTelegramBotAPI разбирает его как Message.
+        return _ok(
+            {
+                "message_id": len(self.sent_messages),
+                "date": 1_700_000_000,
+                "chat": {"id": int(chat_id), "type": "private"},
+                "text": text,
+            }
+        )
+
     async def _get_updates(self, request: web.Request) -> web.Response:
-        params = dict(request.query)
-        params.update(await request.post())
+        params = await _request_params(request)
         offset = int(params.get("offset") or 0)
         # Сообщения с меньшим update_id уже подтверждены клиентом и больше не отдаются.
         self._pending = [update for update in self._pending if update["update_id"] >= offset]

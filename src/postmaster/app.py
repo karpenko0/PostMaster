@@ -18,9 +18,16 @@ from telebot.asyncio_helper import ApiTelegramException
 from postmaster.bot.factory import close_bot_session, create_bot
 from postmaster.bot.transport import PollingTransport, Transport
 from postmaster.config import ConfigError, Settings, load_settings
-from postmaster.database.engine import check_database, create_database_engine
+from postmaster.database.engine import (
+    check_database,
+    create_database_engine,
+    create_session_factory,
+)
+from postmaster.database.schema import create_schema
 from postmaster.handlers.registry import register_handlers
+from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.scheduler_service import SchedulerService
+from postmaster.services.user_service import UserService
 from postmaster.utils.logging_config import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -57,24 +64,38 @@ class Application:
         self._transport = transport
         self._closed = False
 
+    @property
+    def bot(self) -> AsyncTeleBot:
+        """Бот приложения. Нужен тестам и диагностике."""
+        return self._bot
+
     @classmethod
     def from_settings(cls, settings: Settings) -> "Application":
         """Создаёт боевую конфигурацию из настроек. Сеть на этом шаге не используется."""
+        engine = create_database_engine(settings.database_url)
+        session_factory = create_session_factory(engine)
+        user_service = UserService(
+            UserRepository(session_factory),
+            default_timezone=settings.default_timezone,
+        )
         bot = create_bot(settings.bot_token.get_secret_value())
-        register_handlers(bot)
+        register_handlers(bot, user_service=user_service)
         return cls(
             bot=bot,
-            engine=create_database_engine(settings.database_url),
+            engine=engine,
             scheduler=SchedulerService(),
             transport=PollingTransport(bot),
         )
 
     async def startup(self) -> None:
-        """Проверяет доступность БД и запускает Scheduler."""
+        """Проверяет доступность БД, создаёт недостающие таблицы и запускает Scheduler."""
         try:
             await check_database(self._engine)
+            await create_schema(self._engine)
         except Exception:
-            raise StartupError("база данных недоступна, проверьте DATABASE_URL") from None
+            raise StartupError(
+                "база данных недоступна или не готова, проверьте DATABASE_URL"
+            ) from None
         self._scheduler.start()
 
     async def run(self) -> None:

@@ -1,4 +1,4 @@
-"""Базовый класс ORM-моделей. Таблицы users и posts добавляются в SPEC-007 и SPEC-008."""
+"""Базовый класс ORM-моделей. Модели таблиц находятся в database/models.py."""
 
 from sqlalchemy.orm import DeclarativeBase
 

@@ -36,6 +36,7 @@ def test_defaults_apply_when_optional_values_are_absent(
 
     assert settings.database_url == DEFAULT_DATABASE_URL
     assert settings.log_level == "INFO"
+    assert settings.default_timezone == "UTC"
 
 
 def test_env_file_values_are_loaded(clean_env: None, tmp_path: Path) -> None:
@@ -116,3 +117,24 @@ def test_empty_database_url_is_rejected(clean_env: None, monkeypatch: pytest.Mon
         load_settings(env_file=None)
 
     assert "DATABASE_URL" in str(info.value)
+
+
+def test_default_timezone_is_read_from_environment(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # BR-04 SPEC-002: пояс по умолчанию задаётся переменной DEFAULT_TIMEZONE.
+    monkeypatch.setenv("BOT_TOKEN", TEST_TOKEN)
+    monkeypatch.setenv("DEFAULT_TIMEZONE", "Europe/Moscow")
+
+    assert load_settings(env_file=None).default_timezone == "Europe/Moscow"
+
+
+@pytest.mark.parametrize("value", ["Mars/Olympus", "Europe", "../etc/passwd", ""])
+def test_unknown_default_timezone_is_rejected(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("BOT_TOKEN", TEST_TOKEN)
+    monkeypatch.setenv("DEFAULT_TIMEZONE", value)
+
+    with pytest.raises(ConfigError, match="DEFAULT_TIMEZONE"):
+        load_settings(env_file=None)

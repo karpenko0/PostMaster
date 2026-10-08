@@ -10,7 +10,7 @@ from fake_telegram import FakeTelegram
 from postmaster.bot.factory import close_bot_session
 
 # Переменные настроек. Тесты очищают их, потому что load_dotenv() пишет в os.environ.
-SETTINGS_ENV_NAMES = ("BOT_TOKEN", "DATABASE_URL", "LOG_LEVEL")
+SETTINGS_ENV_NAMES = ("BOT_TOKEN", "DATABASE_URL", "LOG_LEVEL", "DEFAULT_TIMEZONE")
 
 
 @pytest.fixture
