@@ -1,13 +1,18 @@
 """Общие фикстуры тестов: чистое окружение, откат логирования и локальный fake Telegram API."""
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 
 import pytest
 import telebot.asyncio_helper as telebot_http
 
-from fake_telegram import FakeTelegram
+from fake_telegram import TEST_TOKEN, FakeTelegram
+from harness import WAIT_SECONDS, db_path
+from postmaster.app import Application
 from postmaster.bot.factory import close_bot_session
+from postmaster.config import Settings
 
 # Переменные настроек. Тесты очищают их, потому что load_dotenv() пишет в os.environ.
 SETTINGS_ENV_NAMES = ("BOT_TOKEN", "DATABASE_URL", "LOG_LEVEL", "DEFAULT_TIMEZONE")
@@ -57,3 +62,21 @@ async def fake_telegram(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[FakeTe
         yield server
     finally:
         await server.stop()
+
+
+@pytest.fixture
+async def running_app(tmp_path: Path, fake_telegram: FakeTelegram) -> AsyncIterator[Application]:
+    """Запускает приложение с Long Polling на fake API и штатно останавливает его после теста."""
+    settings = Settings(
+        bot_token=TEST_TOKEN,
+        database_url=f"sqlite+aiosqlite:///{db_path(tmp_path)}",
+        log_level="INFO",
+    )
+    app = Application.from_settings(settings)
+    run_task = asyncio.create_task(app.run())
+    await asyncio.wait_for(fake_telegram.get_updates_called.wait(), timeout=WAIT_SECONDS)
+    try:
+        yield app
+    finally:
+        await app.stop()
+        await asyncio.wait_for(run_task, timeout=WAIT_SECONDS)

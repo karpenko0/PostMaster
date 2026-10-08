@@ -47,3 +47,10 @@ class UserService:
     def effective_timezone(self, user: User) -> str:
         """Часовой пояс пользователя или DEFAULT_TIMEZONE, если пояс не задан (BR-04)."""
         return user.effective_timezone(self._default_timezone)
+
+    async def timezone_of(self, telegram_user_id: int) -> str:
+        """Пояс пользователя по telegram_user_id (BR-04). Без записи действует DEFAULT_TIMEZONE."""
+        user = await self._repository.find_by_telegram_id(telegram_user_id)
+        if user is None:
+            return self._default_timezone
+        return user.effective_timezone(self._default_timezone)

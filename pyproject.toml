@@ -48,4 +48,4 @@ select = ["E", "W", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
 # fake_telegram — вспомогательный модуль тестов, а не сторонняя библиотека.
-known-first-party = ["fake_telegram"]
+known-first-party = ["fake_telegram", "harness"]

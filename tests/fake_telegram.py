@@ -65,11 +65,83 @@ class FakeTelegram:
         user_id: int | None = None,
         username: str | None = None,
         first_name: str = "Tester",
+        chat_type: str = "private",
     ) -> None:
-        """Ставит в очередь сообщение, которое вернётся при следующем getUpdates.
+        """Ставит в очередь текстовое сообщение. Команды получают сущность bot_command."""
+        body: dict[str, Any] = {"text": text}
+        if text.startswith("/"):
+            body["entities"] = [
+                {"type": "bot_command", "offset": 0, "length": len(text.split()[0])}
+            ]
+        self.add_message(
+            body,
+            chat_id,
+            user_id=user_id,
+            username=username,
+            first_name=first_name,
+            chat_type=chat_type,
+        )
 
-        По умолчанию отправитель совпадает с чатом и не имеет username. Параметры user_id,
-        username и first_name задают отправителя явно.
+    def add_photo_message(
+        self,
+        file_id: str,
+        chat_id: int = 42,
+        *,
+        user_id: int | None = None,
+        username: str | None = None,
+        first_name: str = "Tester",
+        chat_type: str = "private",
+    ) -> None:
+        """Ставит в очередь фотографию в двух размерах, как присылает Telegram."""
+        sizes = [
+            {
+                "file_id": f"{file_id}-small",
+                "file_unique_id": f"{file_id}-s",
+                "width": 90,
+                "height": 90,
+            },
+            {"file_id": file_id, "file_unique_id": f"{file_id}-l", "width": 1280, "height": 960},
+        ]
+        self.add_message(
+            {"photo": sizes},
+            chat_id,
+            user_id=user_id,
+            username=username,
+            first_name=first_name,
+            chat_type=chat_type,
+        )
+
+    def add_media_message(
+        self,
+        content_type: str,
+        chat_id: int = 42,
+        *,
+        user_id: int | None = None,
+        first_name: str = "Tester",
+        chat_type: str = "private",
+    ) -> None:
+        """Ставит в очередь медиа, которое не является текстом или фото (например, документ)."""
+        body = {
+            content_type: {
+                "file_id": f"{content_type}-file",
+                "file_unique_id": f"{content_type}-uid",
+            }
+        }
+        self.add_message(body, chat_id, user_id=user_id, first_name=first_name, chat_type=chat_type)
+
+    def add_message(
+        self,
+        body: dict[str, Any],
+        chat_id: int = 42,
+        *,
+        user_id: int | None = None,
+        username: str | None = None,
+        first_name: str = "Tester",
+        chat_type: str = "private",
+    ) -> None:
+        """Ставит в очередь сообщение с полями body. По умолчанию это личный чат с пользователем.
+
+        Отправитель совпадает с чатом, если user_id не задан. Для групп chat_type = "group".
         """
         update_id = next(self._update_ids)
         sender: dict[str, Any] = {
@@ -79,17 +151,17 @@ class FakeTelegram:
         }
         if username is not None:
             sender["username"] = username
+        if chat_type == "private":
+            chat: dict[str, Any] = {"id": chat_id, "type": "private", "first_name": first_name}
+        else:
+            chat = {"id": chat_id, "type": chat_type, "title": "Тестовая группа"}
         message: dict[str, Any] = {
             "message_id": update_id,
             "date": 1_700_000_000,
-            "chat": {"id": chat_id, "type": "private", "first_name": first_name},
+            "chat": chat,
             "from": sender,
-            "text": text,
+            **body,
         }
-        if text.startswith("/"):
-            message["entities"] = [
-                {"type": "bot_command", "offset": 0, "length": len(text.split()[0])}
-            ]
         self._pending.append({"update_id": update_id, "message": message})
 
     async def start(self) -> None:

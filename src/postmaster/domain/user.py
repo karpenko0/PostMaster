@@ -1,20 +1,10 @@
-"""Пользователь PostMaster и его состояния в сценарии (SPEC-002).
+"""Пользователь PostMaster (SPEC-002).
 
-Модуль не импортирует Telegram и базу данных, поэтому правила проверяются без них.
+Состояния диалога описаны в domain/dialog.py. Модуль не импортирует Telegram и базу данных.
 """
 
 from dataclasses import dataclass
 from datetime import datetime
-from enum import StrEnum
-
-
-class UserState(StrEnum):
-    """Состояние пользователя в сценарии (BR-03).
-
-    Хранится в памяти процесса, а не в таблице users (решение D1 плана SPEC-002).
-    """
-
-    WAITING_PHOTO = "WAITING_PHOTO"
 
 
 class DuplicateTelegramUserError(Exception):

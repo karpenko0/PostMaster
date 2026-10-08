@@ -1,15 +1,24 @@
 """Регистрация Telegram-обработчиков в боте.
 
 Сервисы передаются в регистрацию явно, поэтому обработчики не создают зависимости сами.
-На этапе SPEC-002 зарегистрирована команда /start. Остальные команды добавятся в SPEC-017…019.
+Порядок важен: /start регистрируется раньше обработчиков текста, иначе текст «/start»
+попал бы в обработчик шагов сценария.
 """
 
 from telebot.async_telebot import AsyncTeleBot
 
+from postmaster.handlers.dialog import register_dialog_handlers
 from postmaster.handlers.start import register_start_handler
+from postmaster.services.dialog_service import DialogService
 from postmaster.services.user_service import UserService
 
 
-def register_handlers(bot: AsyncTeleBot, *, user_service: UserService) -> None:
+def register_handlers(
+    bot: AsyncTeleBot,
+    *,
+    user_service: UserService,
+    dialog_service: DialogService,
+) -> None:
     """Регистрирует все обработчики бота."""
-    register_start_handler(bot, user_service)
+    register_start_handler(bot, user_service, dialog_service)
+    register_dialog_handlers(bot, dialog_service)

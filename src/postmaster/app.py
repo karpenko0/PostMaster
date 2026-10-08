@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from telebot.async_telebot import AsyncTeleBot
 from telebot.asyncio_helper import ApiTelegramException
 
+from postmaster.bot.dialog_store import TelebotDialogStore
 from postmaster.bot.factory import close_bot_session, create_bot
 from postmaster.bot.transport import PollingTransport, Transport
 from postmaster.config import ConfigError, Settings, load_settings
@@ -26,6 +27,8 @@ from postmaster.database.engine import (
 from postmaster.database.schema import create_schema
 from postmaster.handlers.registry import register_handlers
 from postmaster.repositories.user_repository import UserRepository
+from postmaster.services.dialog_service import DialogService
+from postmaster.services.post_service import PostService
 from postmaster.services.scheduler_service import SchedulerService
 from postmaster.services.user_service import UserService
 from postmaster.utils.logging_config import configure_logging
@@ -79,7 +82,12 @@ class Application:
             default_timezone=settings.default_timezone,
         )
         bot = create_bot(settings.bot_token.get_secret_value())
-        register_handlers(bot, user_service=user_service)
+        dialog_service = DialogService(
+            TelebotDialogStore(bot),
+            user_service=user_service,
+            post_service=PostService(),
+        )
+        register_handlers(bot, user_service=user_service, dialog_service=dialog_service)
         return cls(
             bot=bot,
             engine=engine,

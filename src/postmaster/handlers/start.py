@@ -1,8 +1,9 @@
-"""Обработчик команды /start (SPEC-002: US-01, US-02, AC-03, AC-04).
+"""Обработчик команды /start (SPEC-002: US-01, US-02, AC-03, AC-04; SPEC-003: BR-01).
 
-Обработчик берёт отправителя из сообщения, вызывает UserService и отвечает приветствием.
-Правила регистрации находятся в сервисе (BR-01). Обработчик не обращается к repositories
-и database.
+Обработчик берёт отправителя из сообщения, регистрирует пользователя через UserService,
+отвечает приветствием и переводит диалог в WAITING_PHOTO через DialogService. Правила находятся
+в сервисах (BR-01). Обработчик не обращается к repositories и database. Команда работает только
+в личных чатах (решение D14 плана SPEC-003).
 """
 
 import logging
@@ -10,7 +11,7 @@ import logging
 from telebot.async_telebot import AsyncTeleBot
 from telebot.types import Message
 
-from postmaster.domain.user import UserState
+from postmaster.services.dialog_service import DialogService
 from postmaster.services.user_service import UserService
 
 logger = logging.getLogger(__name__)
@@ -21,10 +22,14 @@ START_GREETING = (
 )
 
 
-def register_start_handler(bot: AsyncTeleBot, user_service: UserService) -> None:
+def register_start_handler(
+    bot: AsyncTeleBot,
+    user_service: UserService,
+    dialog_service: DialogService,
+) -> None:
     """Регистрирует обработчик /start в боте."""
 
-    @bot.message_handler(commands=["start"])
+    @bot.message_handler(commands=["start"], chat_types=["private"])
     async def handle_start(message: Message) -> None:
         sender = message.from_user
         if sender is None:
@@ -39,5 +44,5 @@ def register_start_handler(bot: AsyncTeleBot, user_service: UserService) -> None
             message.chat.id,
             START_GREETING.format(first_name=sender.first_name),
         )
-        # Состояние ставится после приветствия, потому что пользователь ждёт фото после ответа.
-        await bot.set_state(sender.id, UserState.WAITING_PHOTO.value, message.chat.id)
+        # Диалог переходит в WAITING_PHOTO после приветствия: пользователь ждёт фото после ответа.
+        await dialog_service.start(sender.id, message.chat.id)

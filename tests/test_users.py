@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -188,3 +188,29 @@ def test_effective_timezone_falls_back_to_default_when_user_has_none() -> None:
 
 def test_effective_timezone_prefers_timezone_set_by_user() -> None:
     assert _user(timezone="Asia/Tokyo").effective_timezone("Europe/Moscow") == "Asia/Tokyo"
+
+
+async def test_timezone_of_returns_default_without_record_or_own_timezone(
+    session_factory: SessionFactory, repository: UserRepository
+) -> None:
+    # BR-04: без записи и без собственного пояса действует DEFAULT_TIMEZONE.
+    service = UserService(repository, default_timezone="Europe/Moscow")
+    await service.get_or_create(50, None, "Ольга")
+
+    assert await service.timezone_of(999) == "Europe/Moscow"
+    assert await service.timezone_of(50) == "Europe/Moscow"
+
+
+async def test_timezone_of_prefers_timezone_stored_for_user(
+    session_factory: SessionFactory, repository: UserRepository
+) -> None:
+    # BR-04: если пояс пользователя задан, он важнее DEFAULT_TIMEZONE. В SPEC-003 пояс
+    # не задаётся пользователем, поэтому запись обновляется напрямую.
+    service = UserService(repository, default_timezone="Europe/Moscow")
+    await service.get_or_create(51, None, "Мария")
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            update(UserModel).where(UserModel.telegram_user_id == 51).values(timezone="Asia/Tokyo")
+        )
+
+    assert await service.timezone_of(51) == "Asia/Tokyo"
