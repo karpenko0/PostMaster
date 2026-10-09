@@ -90,9 +90,40 @@ async def test_repeated_start_returns_same_user_without_duplicate(
 
     assert second.id == first.id
     assert await _count_rows(session_factory, 42) == 1
-    # Существующая запись не меняется (решение D3 плана SPEC-002).
-    assert second.username == "ivan"
-    assert second.first_name == "Иван"
+    # Дубликата нет, но изменившиеся имя и username записываются (решение D3, пересмотрено).
+    assert second.username == "ivan_new"
+    assert second.first_name == "Иван Петров"
+
+
+async def test_repeated_start_with_new_name_updates_profile_only(
+    service: UserService, session_factory: SessionFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Решение D3 (пересмотрено): новые username и first_name записываются вместе с updated_at.
+    # Дата создания и часовой пояс не меняются. Если данные совпали, запись не пишется.
+    monkeypatch.setattr("postmaster.services.user_service.utc_now", lambda: MOMENT)
+    created = await service.get_or_create(42, "old_name", "Иван")
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            update(UserModel)
+            .where(UserModel.telegram_user_id == 42)
+            .values(timezone="Europe/Moscow")
+        )
+
+    later = MOMENT + timedelta(days=1)
+    monkeypatch.setattr("postmaster.services.user_service.utc_now", lambda: later)
+    updated = await service.get_or_create(42, "new_name", "Иван Петров")
+
+    assert (updated.username, updated.first_name) == ("new_name", "Иван Петров")
+    assert updated.created_at == created.created_at
+    assert updated.updated_at == later
+    assert updated.timezone == "Europe/Moscow"
+
+    unchanged_moment = later + timedelta(hours=1)
+    monkeypatch.setattr("postmaster.services.user_service.utc_now", lambda: unchanged_moment)
+    same = await service.get_or_create(42, "new_name", "Иван Петров")
+
+    assert same.updated_at == later
+    assert await _count_rows(session_factory, 42) == 1
 
 
 async def test_user_without_username_is_stored_with_empty_username(

@@ -5,9 +5,17 @@
 """
 
 import asyncio
+from pathlib import Path
 
 from fake_telegram import FakeTelegram
-from harness import current_state, future_date_text, wait_for_state, wait_until
+from harness import (
+    current_state,
+    db_path,
+    future_date_text,
+    users_rows,
+    wait_for_state,
+    wait_until,
+)
 from postmaster.app import Application
 from postmaster.domain.dialog import DialogState
 from postmaster.handlers.dialog import HINT_BY_STATE
@@ -153,7 +161,7 @@ async def test_start_during_scenario_discards_photo_and_restarts(
 
 
 async def test_group_chat_messages_are_ignored(
-    running_app: Application, fake_telegram: FakeTelegram
+    running_app: Application, fake_telegram: FakeTelegram, tmp_path: Path
 ) -> None:
     # D14: в группе сценарий не запускается, бот не отвечает на каждое сообщение.
     fake_telegram.add_text_message(
@@ -172,3 +180,5 @@ async def test_group_chat_messages_are_ignored(
 
     assert {message["chat_id"] for message in fake_telegram.sent_messages} == {"42"}
     assert await current_state(running_app, 77, -1001) is None
+    # В группе /start не обрабатывается, поэтому пользователь не регистрируется (D14).
+    assert users_rows(db_path(tmp_path), 77) == []

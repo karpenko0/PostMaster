@@ -60,6 +60,31 @@ class UserRepository:
             raise DuplicateTelegramUserError("пользователь уже зарегистрирован") from exc
         return _to_domain(model)
 
+    async def update_profile(
+        self,
+        *,
+        telegram_user_id: int,
+        username: str | None,
+        first_name: str,
+        now: datetime,
+    ) -> User:
+        """Обновляет username, first_name и updated_at. Пояс и created_at не меняются.
+
+        Raises:
+            RuntimeError: строки с таким telegram_user_id нет. Строки в MVP не удаляются,
+                поэтому это ошибка данных, а не штатная ситуация.
+        """
+        async with self._session_factory() as session, session.begin():
+            model = await session.scalar(
+                select(UserModel).where(UserModel.telegram_user_id == telegram_user_id)
+            )
+            if model is None:
+                raise RuntimeError("пользователя для обновления нет в базе")
+            model.username = username
+            model.first_name = first_name
+            model.updated_at = _to_storage(now)
+        return _to_domain(model)
+
 
 def _to_domain(model: UserModel) -> User:
     return User(

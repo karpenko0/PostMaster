@@ -25,24 +25,32 @@ class UserService:
     ) -> User:
         """Возвращает существующего пользователя или создаёт нового (AC-01, AC-02, BR-02).
 
-        Существующая запись не меняется: профиль не обновляется (решение D3 плана SPEC-002).
+        Если username или first_name изменились, они обновляются вместе с updated_at (решение D3
+        плана SPEC-002, пересмотрено при закрытии открытых вопросов). Пояс и дата создания не
+        меняются. Если данные совпадают, запись не пишется.
         """
         existing = await self._repository.find_by_telegram_id(telegram_user_id)
-        if existing is not None:
+        if existing is None:
+            try:
+                return await self._repository.add(
+                    telegram_user_id=telegram_user_id,
+                    username=username,
+                    first_name=first_name,
+                    now=utc_now(),
+                )
+            except DuplicateTelegramUserError:
+                # Параллельный /start успел создать строку (решение D7). Берём её, дубликата нет.
+                existing = await self._repository.find_by_telegram_id(telegram_user_id)
+                if existing is None:
+                    raise
+        if existing.username == username and existing.first_name == first_name:
             return existing
-        try:
-            return await self._repository.add(
-                telegram_user_id=telegram_user_id,
-                username=username,
-                first_name=first_name,
-                now=utc_now(),
-            )
-        except DuplicateTelegramUserError:
-            # Параллельный /start успел создать строку (решение D7). Берём её, дубликата нет.
-            existing = await self._repository.find_by_telegram_id(telegram_user_id)
-            if existing is None:
-                raise
-            return existing
+        return await self._repository.update_profile(
+            telegram_user_id=telegram_user_id,
+            username=username,
+            first_name=first_name,
+            now=utc_now(),
+        )
 
     def effective_timezone(self, user: User) -> str:
         """Часовой пояс пользователя или DEFAULT_TIMEZONE, если пояс не задан (BR-04)."""

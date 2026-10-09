@@ -12,7 +12,7 @@ from fake_telegram import FakeTelegram
 from harness import db_path, users_rows, wait_for_state, wait_until
 from postmaster.app import Application
 from postmaster.domain.dialog import DialogState
-from postmaster.handlers.start import START_GREETING
+from postmaster.handlers.start import START_FAILED, START_GREETING
 from postmaster.repositories.user_repository import UserRepository
 
 
@@ -84,8 +84,27 @@ async def test_failed_registration_keeps_data_and_state(
 
     _send_start(fake_telegram, 42, "ivan", "Иван")
     await wait_until(error_logged)
+    await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
 
-    # Ошибка не должна испортить данные и состояние, полученные раньше (§7 п. 4).
-    assert len(fake_telegram.sent_messages) == 1
+    # Ошибка не портит данные и состояние, полученные раньше (§7 п. 4). Пользователь получает
+    # короткий ответ, а не тишину (решение D5). Приветствие при этом не повторяется.
+    assert fake_telegram.sent_messages[1]["text"] == START_FAILED
     assert await running_app.bot.get_state(42, 42) == DialogState.WAITING_PHOTO.value
     assert len(users_rows(db_path(tmp_path), 42)) == 1
+
+
+async def test_repeated_start_stores_changed_name(
+    running_app: Application, fake_telegram: FakeTelegram, tmp_path: Path
+) -> None:
+    # Решение D3 (пересмотрено): новые username и имя записываются, строка остаётся одна.
+    _send_start(fake_telegram, 42, "ivan", "Иван")
+    await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
+
+    _send_start(fake_telegram, 42, "ivan_new", "Иван Петров")
+    # Приветствие уходит после записи в БД, поэтому после второго ответа строка уже обновлена.
+    await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
+
+    rows = users_rows(db_path(tmp_path), 42)
+    assert [(username, first_name) for _, username, first_name in rows] == [
+        ("ivan_new", "Иван Петров")
+    ]

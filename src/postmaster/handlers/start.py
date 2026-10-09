@@ -20,6 +20,7 @@ START_GREETING = (
     "Здравствуйте, {first_name}! Я PostMaster, помогу запланировать публикацию.\n\n"
     "Отправьте фотографию, которую хотите опубликовать."
 )
+START_FAILED = "Не удалось обработать /start. Попробуйте ещё раз немного позже."
 
 
 def register_start_handler(
@@ -37,8 +38,10 @@ def register_start_handler(
         try:
             await user_service.get_or_create(sender.id, sender.username, sender.first_name)
         except Exception:
-            # Данные не меняются, состояние тоже (§7 п. 4). Ответа пользователю нет (решение D5).
+            # Данные не меняются, состояние тоже (§7 п. 4). Пользователь получает короткий ответ,
+            # чтобы не остаться в тишине (решение D5, пересмотрено при закрытии открытых вопросов).
             logger.exception("Не удалось зарегистрировать пользователя при /start")
+            await bot.send_message(message.chat.id, START_FAILED)
             return
         await bot.send_message(
             message.chat.id,
