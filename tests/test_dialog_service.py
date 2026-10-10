@@ -2,6 +2,7 @@
 
 Хранилище в памяти повторяет правило StateMemoryStorage: данные нельзя записать без состояния
 (решение D3). Поэтому ошибка порядка записи проявится в тестах, а не только в Telegram.
+Фото приходит как PhotoData, в черновике лежат метаданные из §16 SPEC-004 (IT-004-02, IT-004-03).
 """
 
 import asyncio
@@ -12,6 +13,7 @@ import pytest
 
 from harness import future_date_text
 from postmaster.domain.dialog import DialogState
+from postmaster.domain.photo import PhotoData
 from postmaster.domain.post import Post
 from postmaster.domain.schedule import DATETIME_FORMAT
 from postmaster.services.dialog_service import DialogOutcomeKind, DialogService
@@ -22,6 +24,44 @@ CHAT = 42
 IDLE = DialogState.IDLE
 WAITING_PHOTO = DialogState.WAITING_PHOTO
 WAITING_DATETIME = DialogState.WAITING_DATETIME
+
+
+def photo(
+    file_id: str,
+    *,
+    unique: str | None = None,
+    file_size: int | None = 150000,
+    width: int = 1280,
+    height: int = 960,
+) -> PhotoData:
+    """PhotoData для тестов. Значения по умолчанию совпадают с большой фотографией fake Telegram."""
+    return PhotoData(
+        file_id=file_id,
+        file_unique_id=unique if unique is not None else f"{file_id}-uid",
+        file_size=file_size,
+        width=width,
+        height=height,
+    )
+
+
+def draft_of(
+    file_id: str,
+    *,
+    unique: str | None = None,
+    file_size: str | None = "150000",
+    width: str = "1280",
+    height: str = "960",
+) -> dict[str, str]:
+    """Ожидаемый черновик: ключи §16 SPEC-004. Задан вручную, чтобы ловить переименования."""
+    result = {
+        "telegram_file_id": file_id,
+        "telegram_file_unique_id": unique if unique is not None else f"{file_id}-uid",
+        "width": width,
+        "height": height,
+    }
+    if file_size is not None:
+        result["file_size"] = file_size
+    return result
 
 
 class InMemoryDialogStore:
@@ -50,7 +90,7 @@ class YieldingDialogStore(InMemoryDialogStore):
     """Уступает управление event loop перед чтением и перед записью состояния.
 
     Без уступки оба сообщения из теста выполнялись бы подряд, и гонка не возникала бы даже без
-    блокировки в DialogService. С уступкой без блокировки оба фото прочитают WAITING_PHOTO.
+    блокировки в DialogService. С уступкой без блокировки оба фото прочитали бы WAITING_PHOTO.
     """
 
     async def get_state(self, user_id: int, chat_id: int) -> str | None:
@@ -123,7 +163,7 @@ async def test_start_from_any_state_begins_new_scenario(
 ) -> None:
     # BR-01: /start из любого шага начинает новый сценарий и очищает прежний черновик.
     store.states[USER, CHAT] = state
-    store.drafts[USER, CHAT] = {"photo_file_id": "old-photo"}
+    store.drafts[USER, CHAT] = {"telegram_file_id": "old-photo"}
 
     outcome = await service.start(USER, CHAT)
 
@@ -137,12 +177,40 @@ async def test_photo_moves_to_waiting_datetime_and_keeps_file(
     # BR-02, TC-01.
     await service.start(USER, CHAT)
 
-    outcome = await service.receive_photo(USER, CHAT, "photo-1")
+    outcome = await service.receive_photo(USER, CHAT, photo("photo-1"))
 
     assert outcome.kind == DialogOutcomeKind.PHOTO_ACCEPTED
     assert outcome.state == WAITING_DATETIME
     assert store.states[USER, CHAT] == WAITING_DATETIME
-    assert store.drafts[USER, CHAT] == {"photo_file_id": "photo-1"}
+    assert store.drafts[USER, CHAT] == draft_of("photo-1")
+
+
+async def test_photo_draft_carries_all_metadata(
+    service: DialogService, store: InMemoryDialogStore
+) -> None:
+    # TC-004-03, IT-004-02: в FSM сохранены file_id, file_unique_id, file_size, width, height (§16).
+    await service.start(USER, CHAT)
+
+    await service.receive_photo(
+        USER,
+        CHAT,
+        photo("photo-1", unique="uid-77", file_size=154923, width=1280, height=1280),
+    )
+
+    assert store.drafts[USER, CHAT] == draft_of(
+        "photo-1", unique="uid-77", file_size="154923", width="1280", height="1280"
+    )
+
+
+async def test_photo_without_file_size_omits_key(
+    service: DialogService, store: InMemoryDialogStore
+) -> None:
+    # §11: file_size не обязателен, в черновик ключ не пишется.
+    await service.start(USER, CHAT)
+
+    await service.receive_photo(USER, CHAT, photo("photo-1", file_size=None))
+
+    assert store.drafts[USER, CHAT] == draft_of("photo-1", file_size=None)
 
 
 async def test_new_photo_on_date_step_replaces_previous_and_asks_again(
@@ -150,16 +218,33 @@ async def test_new_photo_on_date_step_replaces_previous_and_asks_again(
 ) -> None:
     # BR-04, AC-04, TC-03: замена фото, состояние то же, дата запрашивается снова.
     await service.start(USER, CHAT)
-    await service.receive_photo(USER, CHAT, "photo-1")
+    await service.receive_photo(USER, CHAT, photo("photo-1"))
 
-    outcome = await service.receive_photo(USER, CHAT, "photo-2")
+    outcome = await service.receive_photo(USER, CHAT, photo("photo-2"))
 
     assert outcome.kind == DialogOutcomeKind.PHOTO_REPLACED
     assert outcome.state == WAITING_DATETIME
-    assert store.drafts[USER, CHAT] == {"photo_file_id": "photo-2"}
+    assert store.drafts[USER, CHAT] == draft_of("photo-2")
 
     await service.receive_text(USER, CHAT, future_date_text())
     assert [post.photo_file_id for post in posts.created] == ["photo-2"]
+
+
+async def test_replaced_photo_rewrites_all_metadata(
+    service: DialogService, store: InMemoryDialogStore
+) -> None:
+    # IT-004-03: данные предыдущего фото полностью заменяются новыми (§27).
+    await service.start(USER, CHAT)
+    await service.receive_photo(
+        USER, CHAT, photo("photo-a", unique="uid-a", file_size=2500, width=90, height=90)
+    )
+
+    await service.receive_photo(
+        USER, CHAT, photo("photo-b", unique="uid-b", file_size=150000, width=1280, height=960)
+    )
+
+    assert store.drafts[USER, CHAT] == draft_of("photo-b", unique="uid-b")
+    assert "uid-a" not in store.drafts[USER, CHAT].values()
 
 
 async def test_valid_date_creates_post_and_returns_to_idle(
@@ -167,7 +252,7 @@ async def test_valid_date_creates_post_and_returns_to_idle(
 ) -> None:
     # BR-03, AC-03, TC-01.
     await service.start(USER, CHAT)
-    await service.receive_photo(USER, CHAT, "photo-1")
+    await service.receive_photo(USER, CHAT, photo("photo-1"))
 
     outcome = await service.receive_text(USER, CHAT, future_date_text(days=2))
 
@@ -194,7 +279,7 @@ async def test_outcome_shows_time_in_user_timezone_and_post_keeps_utc(
     )
     local = (datetime.now(moscow) + timedelta(days=2)).replace(second=0, microsecond=0)
     await service.start(USER, CHAT)
-    await service.receive_photo(USER, CHAT, "photo-1")
+    await service.receive_photo(USER, CHAT, photo("photo-1"))
 
     outcome = await service.receive_text(USER, CHAT, local.strftime(DATETIME_FORMAT))
 
@@ -211,13 +296,13 @@ async def test_invalid_date_keeps_waiting_datetime_and_draft(
 ) -> None:
     # D7, TC-02: неверная дата не меняет шаг и не трогает фото.
     await service.start(USER, CHAT)
-    await service.receive_photo(USER, CHAT, "photo-1")
+    await service.receive_photo(USER, CHAT, photo("photo-1"))
 
     outcome = await service.receive_text(USER, CHAT, "31.02.2026 10:00")
 
     assert outcome.kind == DialogOutcomeKind.DATETIME_INVALID
     assert store.states[USER, CHAT] == WAITING_DATETIME
-    assert store.drafts[USER, CHAT] == {"photo_file_id": "photo-1"}
+    assert store.drafts[USER, CHAT] == draft_of("photo-1")
     assert posts.created == []
 
 
@@ -226,14 +311,14 @@ async def test_failed_post_creation_keeps_draft_for_retry(
 ) -> None:
     # §7 п. 4 SPEC-003: сбой не нарушает данные. Черновик остаётся, дату можно повторить.
     await service.start(USER, CHAT)
-    await service.receive_photo(USER, CHAT, "photo-1")
+    await service.receive_photo(USER, CHAT, photo("photo-1"))
     posts.fail_with = RuntimeError("сбой сохранения")
 
     with pytest.raises(RuntimeError, match="сбой сохранения"):
         await service.receive_text(USER, CHAT, future_date_text())
 
     assert store.states[USER, CHAT] == WAITING_DATETIME
-    assert store.drafts[USER, CHAT] == {"photo_file_id": "photo-1"}
+    assert store.drafts[USER, CHAT] == draft_of("photo-1")
 
     posts.fail_with = None
     outcome = await service.receive_text(USER, CHAT, future_date_text())
@@ -266,7 +351,7 @@ async def test_invalid_message_keeps_state_and_draft(
     if reached in ("WAITING_PHOTO", "WAITING_DATETIME"):
         await service.start(USER, CHAT)
     if reached == "WAITING_DATETIME":
-        await service.receive_photo(USER, CHAT, "photo-1")
+        await service.receive_photo(USER, CHAT, photo("photo-1"))
     state_before = store.states.get((USER, CHAT))
     draft_before = dict(store.drafts.get((USER, CHAT), {}))
 
@@ -275,7 +360,7 @@ async def test_invalid_message_keeps_state_and_draft(
     elif message == "date":
         outcome = await service.receive_text(USER, CHAT, future_date_text())
     elif message == "photo":
-        outcome = await service.receive_photo(USER, CHAT, "photo-x")
+        outcome = await service.receive_photo(USER, CHAT, photo("photo-x"))
     else:
         outcome = await service.receive_other(USER, CHAT)
 
@@ -294,8 +379,8 @@ async def test_parallel_photos_are_handled_one_at_a_time(posts: RecordingPostSer
     await service.start(USER, CHAT)
 
     first, second = await asyncio.gather(
-        service.receive_photo(USER, CHAT, "photo-a"),
-        service.receive_photo(USER, CHAT, "photo-b"),
+        service.receive_photo(USER, CHAT, photo("photo-a")),
+        service.receive_photo(USER, CHAT, photo("photo-b")),
     )
 
     assert {first.kind, second.kind} == {
@@ -303,7 +388,7 @@ async def test_parallel_photos_are_handled_one_at_a_time(posts: RecordingPostSer
         DialogOutcomeKind.PHOTO_REPLACED,
     }
     assert store.states[USER, CHAT] == WAITING_DATETIME
-    assert store.drafts[USER, CHAT]["photo_file_id"] in {"photo-a", "photo-b"}
+    assert store.drafts[USER, CHAT]["telegram_file_id"] in {"photo-a", "photo-b"}
 
 
 async def test_parallel_dates_create_one_post(posts: RecordingPostService) -> None:
@@ -312,7 +397,7 @@ async def test_parallel_dates_create_one_post(posts: RecordingPostService) -> No
     store = YieldingDialogStore()
     service = DialogService(store, user_service=FakeUsers(), post_service=posts)  # type: ignore[arg-type]
     await service.start(USER, CHAT)
-    await service.receive_photo(USER, CHAT, "photo-1")
+    await service.receive_photo(USER, CHAT, photo("photo-1"))
 
     outcomes = await asyncio.gather(
         service.receive_text(USER, CHAT, future_date_text()),
@@ -330,7 +415,7 @@ async def test_users_do_not_share_state(service: DialogService, store: InMemoryD
     await service.start(1, 1)
     await service.start(2, 2)
 
-    await service.receive_photo(1, 1, "photo-of-user-1")
+    await service.receive_photo(1, 1, photo("photo-of-user-1"))
 
     assert store.states[1, 1] == WAITING_DATETIME
     assert store.states[2, 2] == WAITING_PHOTO

@@ -28,6 +28,7 @@ from postmaster.database.schema import create_schema
 from postmaster.handlers.registry import register_handlers
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.dialog_service import DialogService
+from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
 from postmaster.services.scheduler_service import SchedulerService
 from postmaster.services.user_service import UserService
@@ -87,7 +88,12 @@ class Application:
             user_service=user_service,
             post_service=PostService(),
         )
-        register_handlers(bot, user_service=user_service, dialog_service=dialog_service)
+        register_handlers(
+            bot,
+            user_service=user_service,
+            dialog_service=dialog_service,
+            photo_service=PhotoService(),
+        )
         return cls(
             bot=bot,
             engine=engine,

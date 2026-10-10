@@ -92,15 +92,25 @@ class FakeTelegram:
         first_name: str = "Tester",
         chat_type: str = "private",
     ) -> None:
-        """Ставит в очередь фотографию в двух размерах, как присылает Telegram."""
+        """Ставит в очередь фотографию в двух размерах, как присылает Telegram.
+
+        Последний элемент — максимальный размер (1280×960, file_size 150000).
+        """
         sizes = [
             {
                 "file_id": f"{file_id}-small",
                 "file_unique_id": f"{file_id}-s",
                 "width": 90,
                 "height": 90,
+                "file_size": 2500,
             },
-            {"file_id": file_id, "file_unique_id": f"{file_id}-l", "width": 1280, "height": 960},
+            {
+                "file_id": file_id,
+                "file_unique_id": f"{file_id}-l",
+                "width": 1280,
+                "height": 960,
+                "file_size": 150000,
+            },
         ]
         self.add_message(
             {"photo": sizes},

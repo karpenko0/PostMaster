@@ -54,6 +54,30 @@ def users_rows(path: Path, telegram_user_id: int) -> list[tuple[int, str | None,
         return list(connection.execute(query, (telegram_user_id,)).fetchall())
 
 
+async def draft_data(app: Application, user_id: int, chat_id: int | None = None) -> dict[str, str]:
+    """Данные черновика FSM: метаданные фотографии из §16 SPEC-004."""
+    data = await app.bot.current_states.get_data(
+        user_id if chat_id is None else chat_id,
+        user_id,
+        bot_id=app.bot.bot_id,
+    )
+    return {key: str(value) for key, value in data.items()}
+
+
+def db_snapshot(path: Path) -> dict[str, list[tuple]]:
+    """Все строки всех таблиц SQLite. Снимки до и после шага сравниваются на равенство."""
+    with closing(sqlite3.connect(path)) as connection:
+        tables = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            ).fetchall()
+        ]
+        return {
+            table: list(connection.execute(f"SELECT * FROM {table}").fetchall()) for table in tables
+        }
+
+
 def future_date_text(days: int = 2) -> str:
     """Дата в формате ДД.ММ.ГГГГ ЧЧ:ММ по UTC, на days дней вперёд.
 

@@ -9,6 +9,7 @@ from fake_telegram import TEST_TOKEN
 from postmaster.bot.factory import create_bot
 from postmaster.bot.transport import PollingTransport, Transport
 from postmaster.publishers.base import Publisher
+from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
 from postmaster.services.publication_service import PublicationService
 from postmaster.services.scheduler_service import SchedulerService
@@ -16,7 +17,7 @@ from postmaster.services.user_service import UserService
 
 
 def test_internal_service_contracts_exist() -> None:
-    for service in (PostService, PublicationService, UserService, SchedulerService):
+    for service in (PostService, PublicationService, UserService, SchedulerService, PhotoService):
         assert inspect.isclass(service)
 
 

@@ -19,13 +19,31 @@ from postmaster.domain.dialog import (
     InvalidTransitionError,
     next_state,
 )
+from postmaster.domain.photo import PhotoData
 from postmaster.domain.schedule import parse_local_datetime
 from postmaster.services.post_service import PostService
 from postmaster.services.user_service import UserService
 from postmaster.utils.clock import utc_now
 
-# Ключ черновика: file_id фотографии, которая ждёт даты.
-PHOTO_KEY = "photo_file_id"
+# Ключи черновика: данные фотографии из §16 SPEC-004. Минимум — telegram_file_id.
+PHOTO_FILE_ID_KEY = "telegram_file_id"
+PHOTO_UNIQUE_ID_KEY = "telegram_file_unique_id"
+PHOTO_FILE_SIZE_KEY = "file_size"
+PHOTO_WIDTH_KEY = "width"
+PHOTO_HEIGHT_KEY = "height"
+
+
+def _photo_draft(photo: PhotoData) -> dict[str, str]:
+    """Данные фото для черновика. Значения строками: хранилище состояний хранит строки."""
+    draft = {
+        PHOTO_FILE_ID_KEY: photo.file_id,
+        PHOTO_UNIQUE_ID_KEY: photo.file_unique_id,
+        PHOTO_WIDTH_KEY: str(photo.width),
+        PHOTO_HEIGHT_KEY: str(photo.height),
+    }
+    if photo.file_size is not None:
+        draft[PHOTO_FILE_SIZE_KEY] = str(photo.file_size)
+    return draft
 
 
 class DialogStore(Protocol):
@@ -92,16 +110,18 @@ class DialogService:
             await self._store.set_draft(user_id, chat_id, {})
         return DialogOutcome(DialogOutcomeKind.STARTED, target)
 
-    async def receive_photo(self, user_id: int, chat_id: int, file_id: str) -> DialogOutcome:
-        """Фото: WAITING_PHOTO → WAITING_DATETIME (BR-02). На шаге даты заменяет фото (BR-04)."""
+    async def receive_photo(self, user_id: int, chat_id: int, photo: PhotoData) -> DialogOutcome:
+        """Фото: WAITING_PHOTO → WAITING_DATETIME (BR-02). На шаге даты заменяет фото (BR-04).
+
+        В черновик попадают все метаданные из §16 SPEC-004, замена сводится к перезаписи.
+        """
         async with self._locks[user_id, chat_id]:
             current = await self._current_state(user_id, chat_id)
             target = next_state(current, DialogEvent.PHOTO)
             if target is None:
                 return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
             await self._store.set_state(user_id, chat_id, target)
-            # В черновике хранится только фото, поэтому замена сводится к перезаписи.
-            await self._store.set_draft(user_id, chat_id, {PHOTO_KEY: file_id})
+            await self._store.set_draft(user_id, chat_id, _photo_draft(photo))
         if current == DialogState.WAITING_DATETIME:
             return DialogOutcome(DialogOutcomeKind.PHOTO_REPLACED, target)
         return DialogOutcome(DialogOutcomeKind.PHOTO_ACCEPTED, target)
@@ -122,7 +142,7 @@ class DialogService:
             if scheduled_at is None:
                 return DialogOutcome(DialogOutcomeKind.DATETIME_INVALID, current)
             draft = await self._store.get_draft(user_id, chat_id)
-            photo_file_id = draft.get(PHOTO_KEY)
+            photo_file_id = draft.get(PHOTO_FILE_ID_KEY)
             if photo_file_id is None:
                 raise RuntimeError("на шаге ввода даты в черновике нет фотографии")
             # Черновик очищается только после успешного создания поста. Если оно упадёт,
