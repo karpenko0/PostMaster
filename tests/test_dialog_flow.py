@@ -116,6 +116,20 @@ async def test_photo_does_not_touch_database(
     assert db_snapshot(db_path(tmp_path)) == before
 
 
+async def test_replies_never_show_file_identifiers(
+    running_app: Application, fake_telegram: FakeTelegram
+) -> None:
+    # §30: file_id и file_unique_id используются только внутри системы и не показываются в ответах.
+    await _start(running_app, fake_telegram)
+
+    await _send_photo(running_app, fake_telegram, "photo-1")
+
+    identifiers = (await draft_data(running_app, 42)).values()
+    for message in fake_telegram.sent_messages:
+        for identifier in identifiers:
+            assert identifier not in message["text"]
+
+
 async def test_photo_before_start_gets_start_hint(
     running_app: Application, fake_telegram: FakeTelegram
 ) -> None:

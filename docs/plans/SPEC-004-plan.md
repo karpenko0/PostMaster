@@ -71,6 +71,8 @@ BR-004-01…BR-004-09, ERR-004-01…ERR-004-03 из `docs/specs/SPEC-004.md`.
 | 4.3 | `tests/test_dialog_flow.py`: цепочка Update → FSM (IT-004-01), `telegram_file_id` в FSM (IT-004-02), замена (IT-004-03), тексты §25/§26, пустой массив (ERR-004-02), отсутствие файлов на диске (AC-004-05) | ✅ |
 | 4.4 | `tests/test_contracts.py`: `PhotoService` в списке сервисов | ✅ |
 | 4.5 | `tests/fake_telegram.py`: `file_size` в фото, пустой массив фото | ✅ |
+| 4.6 | `tests/test_spec_texts.py`: тексты §25/§26 и ключи §16 сверяются с `docs/specs/SPEC-004.md` | ✅ |
+| 4.7 | `tests/test_dialog_flow.py`: §30 — идентификаторы не показываются в ответах | ✅ |
 
 ### Этап 5. Проверки
 
@@ -109,4 +111,6 @@ BR-004-01…BR-004-09, ERR-004-01…ERR-004-03 из `docs/specs/SPEC-004.md`.
 | E2E-004-01 | `test_dialog_flow.py`: полный сценарий | ✅ |
 | ERR-004-01…ERR-004-03 | `test_photo.py`; `test_dialog_flow.py` (ERR-004-02) | ✅ |
 | §29 Логирование | `test_photo.py` (caplog) | ✅ |
+| §30 Идентификаторы не показываются пользователю | `test_dialog_flow.py`: ответы без значений из черновика | ✅ |
+| §25/§26/§16 совпадают с текстом спецификации | `test_spec_texts.py` | ✅ |
 | Слои и зависимости | `test_architecture.py` | ✅ |
