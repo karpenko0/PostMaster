@@ -6,12 +6,12 @@
 """
 
 import asyncio
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
-from zoneinfo import ZoneInfo
 
 from postmaster.domain.dialog import (
     DialogEvent,
@@ -20,10 +20,17 @@ from postmaster.domain.dialog import (
     next_state,
 )
 from postmaster.domain.photo import PhotoData
-from postmaster.domain.schedule import parse_local_datetime
+from postmaster.domain.schedule import (
+    DateTimeErrorCode,
+    DateTimeValidationError,
+    ParsedPublicationDateTime,
+    parse_publication_datetime,
+)
 from postmaster.services.post_service import PostService
 from postmaster.services.user_service import UserService
 from postmaster.utils.clock import utc_now
+
+logger = logging.getLogger(__name__)
 
 # Ключи черновика: данные фотографии из §16 SPEC-004. Минимум — telegram_file_id.
 PHOTO_FILE_ID_KEY = "telegram_file_id"
@@ -73,11 +80,14 @@ class DialogOutcomeKind(StrEnum):
 class DialogOutcome:
     """Результат шага и состояние после него.
 
-    scheduled_at и zone_name заполняются только для POST_CREATED. Время дано в поясе пользователя.
+    error_code заполнен только для DATETIME_INVALID; parsed_datetime передаёт UTC и локальное
+    время в следующий этап. scheduled_at и zone_name — совместимые поля ответа SPEC-003.
     """
 
     kind: DialogOutcomeKind
     state: DialogState
+    error_code: DateTimeErrorCode | None = None
+    parsed_datetime: ParsedPublicationDateTime | None = None
     scheduled_at: datetime | None = None
     zone_name: str | None = None
 
@@ -127,7 +137,7 @@ class DialogService:
         return DialogOutcome(DialogOutcomeKind.PHOTO_ACCEPTED, target)
 
     async def receive_text(self, user_id: int, chat_id: int, text: str) -> DialogOutcome:
-        """Текст: на шаге даты создаёт пост и возвращает в IDLE (BR-03).
+        """Текст: на шаге даты валидирует время и передаёт данные в PostService (SPEC-005).
 
         В других состояниях текст недопустим: сценарий ждёт фото или сообщение не относится к нему.
         """
@@ -137,10 +147,17 @@ class DialogService:
             if target is None:
                 return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
             zone_name = await self._users.timezone_of(user_id)
-            zone = ZoneInfo(zone_name)
-            scheduled_at = parse_local_datetime(text, zone, utc_now())
-            if scheduled_at is None:
-                return DialogOutcome(DialogOutcomeKind.DATETIME_INVALID, current)
+            try:
+                parsed = parse_publication_datetime(text, zone_name, utc_now())
+            except DateTimeValidationError as exc:
+                if exc.code == DateTimeErrorCode.PAST_DATETIME:
+                    logger.info("Past publication datetime rejected user_id=%s", user_id)
+                else:
+                    logger.info("Invalid publication datetime format user_id=%s", user_id)
+                return DialogOutcome(
+                    DialogOutcomeKind.DATETIME_INVALID, current, error_code=exc.code
+                )
+            logger.info("Publication datetime accepted user_id=%s", user_id)
             draft = await self._store.get_draft(user_id, chat_id)
             photo_file_id = draft.get(PHOTO_FILE_ID_KEY)
             if photo_file_id is None:
@@ -150,15 +167,18 @@ class DialogService:
             await self._posts.create_post(
                 owner_telegram_id=user_id,
                 photo_file_id=photo_file_id,
-                scheduled_at=scheduled_at,
+                scheduled_at=parsed.utc_datetime,
+                timezone=parsed.timezone,
+                local_datetime=parsed.local_datetime,
             )
             await self._store.set_state(user_id, chat_id, target)
             await self._store.set_draft(user_id, chat_id, {})
         return DialogOutcome(
             DialogOutcomeKind.POST_CREATED,
             target,
-            scheduled_at=scheduled_at.astimezone(zone),
-            zone_name=zone_name,
+            parsed_datetime=parsed,
+            scheduled_at=parsed.local_datetime,
+            zone_name=parsed.timezone,
         )
 
     async def receive_other(self, user_id: int, chat_id: int) -> DialogOutcome:

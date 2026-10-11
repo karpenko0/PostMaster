@@ -16,7 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///data/postmaster.db"
 DEFAULT_ENV_FILE = ".env"
-DEFAULT_TIMEZONE = "UTC"
+DEFAULT_TIMEZONE = "Europe/Moscow"
 
 # Формат токена Telegram Bot API: "<числовой id бота>:<секретная часть>".
 _TOKEN_PATTERN = re.compile(r"\d{5,}:[A-Za-z0-9_-]{20,}")

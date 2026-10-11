@@ -119,13 +119,17 @@ class RecordingPostService(PostService):
         self.created: list[Post] = []
         self.fail_with: Exception | None = None
 
-    async def create_post(self, *, owner_telegram_id, photo_file_id, scheduled_at) -> Post:
+    async def create_post(
+        self, *, owner_telegram_id, photo_file_id, scheduled_at, timezone=None, local_datetime=None
+    ) -> Post:
         if self.fail_with is not None:
             raise self.fail_with
         post = await super().create_post(
             owner_telegram_id=owner_telegram_id,
             photo_file_id=photo_file_id,
             scheduled_at=scheduled_at,
+            timezone=timezone,
+            local_datetime=local_datetime,
         )
         self.created.append(post)
         return post

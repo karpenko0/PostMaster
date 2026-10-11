@@ -20,10 +20,14 @@ class PostService:
         owner_telegram_id: int,
         photo_file_id: str,
         scheduled_at: datetime,
+        timezone: str | None = None,
+        local_datetime: datetime | None = None,
     ) -> Post:
-        """Собирает публикацию из черновика. Ничего не сохраняет (решение D9 плана SPEC-003)."""
+        """Собирает DTO из черновика. Ничего не сохраняет (SPEC-003 D9, SPEC-005)."""
         return Post(
             owner_telegram_id=owner_telegram_id,
             photo_file_id=photo_file_id,
             scheduled_at=scheduled_at,
+            timezone=timezone,
+            local_datetime=local_datetime,
         )

@@ -1,4 +1,4 @@
-"""Обработчики шагов сценария создания публикации (SPEC-003: US-01, AC-04, TC-02; SPEC-004).
+"""Обработчики шагов сценария (SPEC-003: US-01, AC-04, TC-02; SPEC-004, SPEC-005).
 
 Обработчик передаёт сообщение в сервисы и отправляет текст, который соответствует исходу.
 Тексты ответов находятся здесь, а не в сервисе (решение D12 плана SPEC-003). Фото обрабатывается
@@ -14,7 +14,7 @@ from telebot.util import content_type_media
 
 from postmaster.domain.dialog import DialogState
 from postmaster.domain.photo import PhotoProcessingError
-from postmaster.domain.schedule import DATETIME_EXAMPLE
+from postmaster.domain.schedule import DATETIME_EXAMPLE, DateTimeErrorCode
 from postmaster.services.dialog_service import DialogOutcome, DialogOutcomeKind, DialogService
 from postmaster.services.photo_service import PhotoService
 
@@ -32,6 +32,14 @@ PHOTO_ACCEPTED_TEXT = (
     "ДД.ММ.ГГГГ ЧЧ:ММ\n\n"
     "Например:\n"
     "07.10.2026 15:00"
+)
+
+# Точные подсказки §26 и §27 SPEC-005: формат и прошедший момент.
+INVALID_FORMAT_TEXT = (
+    "⚠️ Я пока не понимаю такой формат.\n\nНапиши дату и время так:\n\n07.10.2026 17:00"
+)
+PAST_DATETIME_TEXT = (
+    "⚠️ Это время уже прошло.\n\nУкажи дату и время в будущем.\n\nНапример:\n08.10.2026 15:00"
 )
 
 # Ответ на сообщение вместо фото и на ошибку обработки фото — §26 и ERR-004-01 SPEC-004.
@@ -56,7 +64,11 @@ def reply_text(outcome: DialogOutcome) -> str:
         case DialogOutcomeKind.PHOTO_REPLACED:
             return f"Фото заменено. {DATE_PROMPT}"
         case DialogOutcomeKind.DATETIME_INVALID:
-            return f"Не удалось распознать дату или она уже прошла. {DATE_PROMPT}"
+            return (
+                PAST_DATETIME_TEXT
+                if outcome.error_code == DateTimeErrorCode.PAST_DATETIME
+                else INVALID_FORMAT_TEXT
+            )
         case DialogOutcomeKind.POST_CREATED:
             when = outcome.scheduled_at.strftime("%d.%m.%Y %H:%M") if outcome.scheduled_at else ""
             return (

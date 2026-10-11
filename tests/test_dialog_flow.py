@@ -21,7 +21,7 @@ from harness import (
 )
 from postmaster.app import Application
 from postmaster.domain.dialog import DialogState
-from postmaster.handlers.dialog import HINT_BY_STATE, PHOTO_ACCEPTED_TEXT
+from postmaster.handlers.dialog import HINT_BY_STATE, INVALID_FORMAT_TEXT, PHOTO_ACCEPTED_TEXT
 
 IDLE = DialogState.IDLE
 WAITING_PHOTO = DialogState.WAITING_PHOTO
@@ -65,7 +65,7 @@ async def test_full_scenario_creates_post_and_returns_to_idle(
     await _reply_count(fake_telegram, 3)
     created = fake_telegram.sent_messages[2]["text"]
     assert created.startswith("Публикация создана на ")
-    assert "(UTC)" in created
+    assert "(Europe/Moscow)" in created
     await wait_for_state(running_app, 42, IDLE)
 
 
@@ -192,7 +192,7 @@ async def test_invalid_date_keeps_waiting_datetime(
     fake_telegram.add_text_message("31.02.2026 10:00", chat_id=42, user_id=42)
     await _reply_count(fake_telegram, 3)
 
-    assert fake_telegram.sent_messages[2]["text"].startswith("Не удалось распознать дату")
+    assert fake_telegram.sent_messages[2]["text"] == INVALID_FORMAT_TEXT
     await wait_for_state(running_app, 42, WAITING_DATETIME)
 
 

@@ -36,7 +36,7 @@ def test_defaults_apply_when_optional_values_are_absent(
 
     assert settings.database_url == DEFAULT_DATABASE_URL
     assert settings.log_level == "INFO"
-    assert settings.default_timezone == "UTC"
+    assert settings.default_timezone == "Europe/Moscow"
 
 
 def test_env_file_values_are_loaded(clean_env: None, tmp_path: Path) -> None:
