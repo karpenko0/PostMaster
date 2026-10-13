@@ -1,7 +1,7 @@
-"""Строгий разбор локальной даты публикации и преобразование в UTC (SPEC-005).
+"""Строгий разбор даты (SPEC-005) и timezone-конвертация (SPEC-006).
 
 Значение now вводится извне: проверка не зависит от системных часов. Правила для
-неоднозначного/несуществующего локального времени при переходе DST определит SPEC-006.
+неоднозначного/несуществующего локального времени при переходе DST ТЗ не задаёт.
 """
 
 import re
@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
 from enum import StrEnum
 from zoneinfo import ZoneInfo
+
+from postmaster.domain.timezone import convert_local_to_utc
 
 DATETIME_FORMAT = "%d.%m.%Y %H:%M"
 DATETIME_EXAMPLE = "15.10.2026 18:30"
@@ -63,7 +65,7 @@ def parse_publication_datetime(
         raise ValueError("now должен содержать часовой пояс")
     zone = ZoneInfo(timezone)
     local = naive.replace(tzinfo=zone)
-    utc = local.astimezone(UTC)
+    utc = convert_local_to_utc(local, timezone)
     if utc <= now.astimezone(UTC):
         raise DateTimeValidationError(DateTimeErrorCode.PAST_DATETIME)
     return ParsedPublicationDateTime(local_datetime=local, timezone=timezone, utc_datetime=utc)

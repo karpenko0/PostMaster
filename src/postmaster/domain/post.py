@@ -15,5 +15,10 @@ class Post:
     owner_telegram_id: int
     photo_file_id: str
     scheduled_at: datetime
-    timezone: str | None = None
+    timezone: str
     local_datetime: datetime | None = None
+
+    @property
+    def scheduled_at_utc(self) -> datetime:
+        """Явное имя UTC-поля для следующего этапа SPEC-008/009."""
+        return self.scheduled_at

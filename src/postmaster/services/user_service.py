@@ -5,6 +5,7 @@
 (BR-01, BR-04). Проверка прав доступа добавится в SPEC-024.
 """
 
+from postmaster.domain.timezone import resolve_user_timezone
 from postmaster.domain.user import DuplicateTelegramUserError, User
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.utils.clock import utc_now
@@ -60,5 +61,5 @@ class UserService:
         """Пояс пользователя по telegram_user_id (BR-04). Без записи действует DEFAULT_TIMEZONE."""
         user = await self._repository.find_by_telegram_id(telegram_user_id)
         if user is None:
-            return self._default_timezone
-        return user.effective_timezone(self._default_timezone)
+            return resolve_user_timezone(None, self._default_timezone)
+        return self.effective_timezone(user)

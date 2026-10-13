@@ -6,6 +6,8 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+from postmaster.domain.timezone import resolve_user_timezone
+
 
 class DuplicateTelegramUserError(Exception):
     """Пользователь с таким telegram_user_id уже существует (BR-01)."""
@@ -24,5 +26,5 @@ class User:
     updated_at: datetime
 
     def effective_timezone(self, default_timezone: str) -> str:
-        """Пояс пользователя или DEFAULT_TIMEZONE, если пользователь его не задал (BR-04)."""
-        return self.timezone or default_timezone
+        """Валидный пояс пользователя или DEFAULT_TIMEZONE (ERR-006-01/02)."""
+        return resolve_user_timezone(self.timezone, default_timezone)

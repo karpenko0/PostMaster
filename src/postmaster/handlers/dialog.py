@@ -15,6 +15,7 @@ from telebot.util import content_type_media
 from postmaster.domain.dialog import DialogState
 from postmaster.domain.photo import PhotoProcessingError
 from postmaster.domain.schedule import DATETIME_EXAMPLE, DateTimeErrorCode
+from postmaster.domain.timezone import convert_utc_to_local
 from postmaster.services.dialog_service import DialogOutcome, DialogOutcomeKind, DialogService
 from postmaster.services.photo_service import PhotoService
 
@@ -70,7 +71,13 @@ def reply_text(outcome: DialogOutcome) -> str:
                 else INVALID_FORMAT_TEXT
             )
         case DialogOutcomeKind.POST_CREATED:
-            when = outcome.scheduled_at.strftime("%d.%m.%Y %H:%M") if outcome.scheduled_at else ""
+            if outcome.parsed_datetime is not None:
+                local = convert_utc_to_local(
+                    outcome.parsed_datetime.utc_datetime, outcome.parsed_datetime.timezone
+                )
+            else:
+                local = outcome.scheduled_at
+            when = local.strftime("%d.%m.%Y %H:%M") if local else ""
             return (
                 f"Публикация создана на {when} ({outcome.zone_name}). "
                 "Чтобы создать новую, отправьте /start."

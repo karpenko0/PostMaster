@@ -6,7 +6,8 @@
 по текущему пользователю (SPEC-024).
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from postmaster.domain.post import Post
 
@@ -20,10 +21,13 @@ class PostService:
         owner_telegram_id: int,
         photo_file_id: str,
         scheduled_at: datetime,
-        timezone: str | None = None,
+        timezone: str,
         local_datetime: datetime | None = None,
     ) -> Post:
-        """Собирает DTO из черновика. Ничего не сохраняет (SPEC-003 D9, SPEC-005)."""
+        """Собирает DTO с UTC и IANA-поясом. Ничего не сохраняет (SPEC-003 D9)."""
+        if scheduled_at.tzinfo is None or scheduled_at.utcoffset() != timedelta(0):
+            raise ValueError("scheduled_at должен быть timezone-aware UTC")
+        ZoneInfo(timezone)
         return Post(
             owner_telegram_id=owner_telegram_id,
             photo_file_id=photo_file_id,
