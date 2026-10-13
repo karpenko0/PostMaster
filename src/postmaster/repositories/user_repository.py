@@ -28,12 +28,16 @@ class UserRepository:
             )
         return None if model is None else _to_domain(model)
 
+    async def get_by_telegram_id(self, telegram_user_id: int) -> User | None:
+        """Контракт SPEC-007 §31; find_by_telegram_id сохранён для SPEC-002."""
+        return await self.find_by_telegram_id(telegram_user_id)
+
     async def add(
         self,
         *,
         telegram_user_id: int,
         username: str | None,
-        first_name: str,
+        first_name: str | None,
         now: datetime,
     ) -> User:
         """Добавляет пользователя. Пояс остаётся пустым, и действует DEFAULT_TIMEZONE (BR-04).
@@ -65,7 +69,7 @@ class UserRepository:
         *,
         telegram_user_id: int,
         username: str | None,
-        first_name: str,
+        first_name: str | None,
         now: datetime,
     ) -> User:
         """Обновляет username, first_name и updated_at. Пояс и created_at не меняются.

@@ -47,7 +47,7 @@ async def wait_for_state(
     await asyncio.wait_for(poll(), WAIT_SECONDS)
 
 
-def users_rows(path: Path, telegram_user_id: int) -> list[tuple[int, str | None, str]]:
+def users_rows(path: Path, telegram_user_id: int) -> list[tuple[int, str | None, str | None]]:
     """Строки users с этим telegram_user_id: (id, username, first_name)."""
     query = "SELECT id, username, first_name FROM users WHERE telegram_user_id = ?"
     with closing(sqlite3.connect(path)) as connection:

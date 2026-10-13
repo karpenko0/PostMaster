@@ -20,7 +20,7 @@ class User:
     id: int
     telegram_user_id: int
     username: str | None
-    first_name: str
+    first_name: str | None
     timezone: str | None
     created_at: datetime
     updated_at: datetime

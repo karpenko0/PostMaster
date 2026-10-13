@@ -20,6 +20,10 @@ START_GREETING = (
     "Здравствуйте, {first_name}! Я PostMaster, помогу запланировать публикацию.\n\n"
     "Отправьте фотографию, которую хотите опубликовать."
 )
+START_GREETING_NO_NAME = (
+    "Здравствуйте! Я PostMaster, помогу запланировать публикацию.\n\n"
+    "Отправьте фотографию, которую хотите опубликовать."
+)
 START_FAILED = "Не удалось обработать /start. Попробуйте ещё раз немного позже."
 
 
@@ -37,15 +41,21 @@ def register_start_handler(
             return
         try:
             await user_service.get_or_create(sender.id, sender.username, sender.first_name)
-        except Exception:
-            # Данные не меняются, состояние тоже (§7 п. 4). Пользователь получает короткий ответ,
-            # чтобы не остаться в тишине (решение D5, пересмотрено при закрытии открытых вопросов).
-            logger.exception("Не удалось зарегистрировать пользователя при /start")
+        except Exception as exc:
+            # Ошибка SQLAlchemy может включать username/first_name в тексте и аргументах SQL.
+            # Логируем только тип, не traceback и не строку исключения (ERR-007-01, §50).
+            logger.error(
+                "Не удалось зарегистрировать пользователя при /start user_id=%s error_type=%s",
+                sender.id,
+                type(exc).__name__,
+            )
             await bot.send_message(message.chat.id, START_FAILED)
             return
         await bot.send_message(
             message.chat.id,
-            START_GREETING.format(first_name=sender.first_name),
+            START_GREETING.format(first_name=sender.first_name)
+            if sender.first_name
+            else START_GREETING_NO_NAME,
         )
         # Диалог переходит в WAITING_PHOTO после приветствия: пользователь ждёт фото после ответа.
         await dialog_service.start(sender.id, message.chat.id)

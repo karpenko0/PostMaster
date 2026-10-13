@@ -64,7 +64,7 @@ class FakeTelegram:
         *,
         user_id: int | None = None,
         username: str | None = None,
-        first_name: str = "Tester",
+        first_name: str | None = "Tester",
         chat_type: str = "private",
     ) -> None:
         """Ставит в очередь текстовое сообщение. Команды получают сущность bot_command."""
@@ -89,7 +89,7 @@ class FakeTelegram:
         *,
         user_id: int | None = None,
         username: str | None = None,
-        first_name: str = "Tester",
+        first_name: str | None = "Tester",
         chat_type: str = "private",
     ) -> None:
         """Ставит в очередь фотографию в двух размерах, как присылает Telegram.
@@ -127,7 +127,7 @@ class FakeTelegram:
         chat_id: int = 42,
         *,
         user_id: int | None = None,
-        first_name: str = "Tester",
+        first_name: str | None = "Tester",
         chat_type: str = "private",
     ) -> None:
         """Ставит в очередь медиа, которое не является текстом или фото (например, документ)."""
@@ -146,7 +146,7 @@ class FakeTelegram:
         *,
         user_id: int | None = None,
         username: str | None = None,
-        first_name: str = "Tester",
+        first_name: str | None = "Tester",
         chat_type: str = "private",
     ) -> None:
         """Ставит в очередь сообщение с полями body. По умолчанию это личный чат с пользователем.
