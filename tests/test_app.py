@@ -2,6 +2,7 @@
 
 import asyncio
 import types
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,10 @@ from telebot.asyncio_helper import ApiTelegramException
 from fake_telegram import TEST_TOKEN
 from postmaster.app import Application, StartupError, main
 from postmaster.config import Settings
-from postmaster.database.engine import create_database_engine
+from postmaster.database.engine import create_database_engine, create_session_factory
+from postmaster.domain.post import PostStatus, PublicationType
+from postmaster.repositories.post_repository import PostRepository
+from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.scheduler_service import SchedulerService
 
 
@@ -90,6 +94,39 @@ async def test_run_starts_and_stops_every_component(tmp_path: Path) -> None:
     assert scheduler.running is False
     assert transport.stop_calls == 1
     assert bot.get_me_calls == 1
+
+
+async def test_spec008_posts_survive_application_restart(tmp_path: Path) -> None:
+    """Реальный startup создаёт posts, а повторный startup не удаляет записи."""
+    app, _scheduler, engine, _transport = _build(tmp_path)
+    try:
+        await app.startup()
+        factory = create_session_factory(engine)
+        now = datetime.now(UTC)
+        user = await UserRepository(factory).add(
+            telegram_user_id=888, username=None, first_name=None, now=now
+        )
+        scheduled = now + timedelta(days=1)
+        post = await PostRepository(factory).create_post(
+            user_id=user.id,
+            telegram_file_id="photo-id",
+            telegram_file_unique_id="unique-id",
+            scheduled_at_utc=scheduled,
+            timezone="Europe/Moscow",
+            publication_type=PublicationType.REMINDER,
+        )
+        assert post.status == PostStatus.PENDING
+    finally:
+        await app.shutdown()
+
+    restarted, _scheduler2, engine2, _transport2 = _build(tmp_path)
+    try:
+        await restarted.startup()
+        repo = PostRepository(create_session_factory(engine2))
+        assert await repo.get_by_id(post.id) == post
+        assert await repo.list_pending_by_user(user.id) == [post]
+    finally:
+        await restarted.shutdown()
 
 
 async def test_shutdown_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

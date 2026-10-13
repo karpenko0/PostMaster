@@ -73,7 +73,7 @@ async def test_profile_timezone_fallback_conversion_and_handoff(
         assert received[0]["timezone"] == resolved_timezone
         assert received[0]["local_datetime"].astimezone(UTC) == scheduled_utc
         assert received[0]["photo_file_id"] == "image"
-        # Таблица posts / Scheduler-job ещё не реализованы: это не проверка их хранения.
+        # Таблица posts уже есть, но диалог не сохраняет пост до SPEC-009; Scheduler-job — позже.
         assert db_snapshot(db_path(tmp_path)) == before
     finally:
         if hasattr(time, "tzset"):

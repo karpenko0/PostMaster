@@ -107,7 +107,7 @@ async def test_photo_leaves_no_image_files_on_disk(
 async def test_photo_does_not_touch_database(
     running_app: Application, fake_telegram: FakeTelegram, tmp_path: Path
 ) -> None:
-    # BR-004-08: фотография сама по себе не создаёт публикацию в БД. Запись придёт с SPEC-008.
+    # BR-004-08: фотография сама по себе не создаёт публикацию в БД. Диалог подключится в SPEC-009.
     await _start(running_app, fake_telegram)
     before = db_snapshot(db_path(tmp_path))
 

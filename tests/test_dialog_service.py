@@ -14,7 +14,7 @@ import pytest
 from harness import future_date_text
 from postmaster.domain.dialog import DialogState
 from postmaster.domain.photo import PhotoData
-from postmaster.domain.post import Post
+from postmaster.domain.post import PostDraft
 from postmaster.domain.schedule import DATETIME_FORMAT
 from postmaster.services.dialog_service import DialogOutcomeKind, DialogService
 from postmaster.services.post_service import PostService
@@ -116,12 +116,12 @@ class RecordingPostService(PostService):
     """Запоминает созданные публикации. Может имитировать сбой записи."""
 
     def __init__(self) -> None:
-        self.created: list[Post] = []
+        self.created: list[PostDraft] = []
         self.fail_with: Exception | None = None
 
     async def create_post(
         self, *, owner_telegram_id, photo_file_id, scheduled_at, timezone=None, local_datetime=None
-    ) -> Post:
+    ) -> PostDraft:
         if self.fail_with is not None:
             raise self.fail_with
         post = await super().create_post(

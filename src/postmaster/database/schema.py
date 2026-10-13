@@ -7,10 +7,10 @@ create_all создаёт только отсутствующие таблицы
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from postmaster.database.base import Base
-from postmaster.database.models import UserModel
+from postmaster.database.models import PostModel, UserModel
 
 # Все таблицы приложения. Новая модель добавляется сюда, иначе create_all её не создаст.
-TABLES = (UserModel.__table__,)
+TABLES = (UserModel.__table__, PostModel.__table__)
 
 
 async def create_schema(engine: AsyncEngine) -> None:

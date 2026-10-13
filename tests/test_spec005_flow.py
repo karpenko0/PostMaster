@@ -161,7 +161,7 @@ async def test_telegram_error_then_correction_without_resending_photo(
         "Публикация создана на 07.10.2026 15:00 (Europe/Moscow)"
     )
     await wait_for_state(running_app, 42, DialogState.IDLE)
-    # Таблица posts и настоящая запись/подтверждение остаются задачей SPEC-008/009.
+    # Таблица posts создана в SPEC-008, подключение записи к диалогу остаётся SPEC-009.
     assert db_snapshot(db_path(tmp_path)) == before
 
 

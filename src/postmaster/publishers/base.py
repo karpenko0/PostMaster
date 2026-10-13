@@ -11,7 +11,7 @@ from typing import Any
 class Publisher(ABC):
     """Публикует пост на внешней площадке.
 
-    Аргумент post пока не типизирован: доменная модель Post появится в SPEC-008.
+    Аргумент post пока не типизирован: конкретные Publisher появятся в SPEC-014/015.
     """
 
     @abstractmethod
