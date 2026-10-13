@@ -201,3 +201,43 @@ async def test_each_telegram_field_can_change_independently(
     assert (after.username, after.first_name) == (username, first_name)
     assert after.created_at == before.created_at
     assert after.updated_at == later
+
+
+async def test_existing_user_never_calls_create_even_when_profile_changes(
+    factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # TC-007-02: COUNT=1 недостаточно — ошибочная попытка INSERT с откатом тоже дала бы 1.
+    repository = UserRepository(factory)
+    service = UserService(repository, default_timezone="Europe/Moscow")
+    first = await service.get_or_create(55, "old", "Иван")
+
+    async def forbidden_create(**kwargs):
+        raise AssertionError("create не должен вызываться для существующего Telegram ID")
+
+    monkeypatch.setattr(repository, "add", forbidden_create)
+    same = await service.get_or_create(55, "old", "Иван")
+    changed = await service.get_or_create(55, "new", "Иван")
+
+    assert same.id == changed.id == first.id
+    assert changed.username == "new"
+
+
+async def test_update_of_missing_user_does_not_create_ghost_profile(factory) -> None:
+    # ERR-007-03: в отличие от /start, update_profile требует уже существующую запись.
+    repository = UserRepository(factory)
+    with pytest.raises(RuntimeError, match="пользователя для обновления нет"):
+        await repository.update_profile(
+            telegram_user_id=404, username="new", first_name=None, now=STAMP
+        )
+    assert await repository.get_by_telegram_id(404) is None
+
+
+async def test_large_telegram_id_is_preserved(factory) -> None:
+    # §11: Telegram ID не должен обрезаться до 32 бит при записи и поиске.
+    telegram_id = 2**40 + 123
+    service = UserService(UserRepository(factory), default_timezone="Europe/Moscow")
+    created = await service.get_or_create(telegram_id, None, None)
+    assert created.telegram_user_id == telegram_id
+    found = await service.get_by_telegram_id(telegram_id)
+    assert found == created
+    assert found.id != telegram_id
