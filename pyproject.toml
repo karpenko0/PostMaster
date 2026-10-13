@@ -16,6 +16,8 @@ dependencies = [
     "python-dotenv>=1.0,<2",
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.3,<3",
+    # zoneinfo использует эту базу, если в минимальном образе/ОС нет системной tzdata (SPEC-006).
+    "tzdata>=2025.2",
 ]
 
 [project.optional-dependencies]

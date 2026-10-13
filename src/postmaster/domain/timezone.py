@@ -19,7 +19,7 @@ def resolve_user_timezone(user_timezone: str | None, default_timezone: str) -> s
     if user_timezone:
         try:
             ZoneInfo(user_timezone)
-        except (ZoneInfoNotFoundError, ValueError, TypeError):
+        except (ZoneInfoNotFoundError, ValueError, TypeError, OSError):
             pass
         else:
             return user_timezone

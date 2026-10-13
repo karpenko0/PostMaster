@@ -3,7 +3,8 @@
 import os
 import time
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, reset_tzpath
 
 import pytest
 
@@ -47,7 +48,9 @@ def test_iana_offsets_vary_by_date_without_using_server_timezone() -> None:
     )
 
 
-@pytest.mark.parametrize("user_zone", [None, "", "Invalid/Timezone", "../UTC", "Mars/Base"])
+@pytest.mark.parametrize(
+    "user_zone", [None, "", "Invalid/Timezone", "../UTC", "Mars/Base", "Europe"]
+)
 def test_missing_or_invalid_user_timezone_falls_back(user_zone: str | None) -> None:
     assert resolve_user_timezone(user_zone, MOSCOW) == MOSCOW
 
@@ -110,7 +113,16 @@ async def test_post_service_handoff_requires_utc_and_publication_timezone() -> N
         timezone=MOSCOW,
     )
     assert post.scheduled_at_utc == EXPECTED_UTC
+    assert post.scheduled_at_utc.tzinfo is UTC
     assert post.timezone == MOSCOW
+    # Пояс с нулевым смещением зимой всё равно нормализуется именно в UTC.
+    winter = await service.create_post(
+        owner_telegram_id=42,
+        photo_file_id="image",
+        scheduled_at=datetime(2026, 1, 7, 12, tzinfo=ZoneInfo("Europe/London")),
+        timezone=MOSCOW,
+    )
+    assert winter.scheduled_at_utc.tzinfo is UTC
     for invalid in (LOCAL, LOCAL.replace(tzinfo=ZoneInfo(MOSCOW))):
         with pytest.raises(ValueError, match="UTC"):
             await service.create_post(
@@ -126,3 +138,21 @@ async def test_post_service_handoff_requires_utc_and_publication_timezone() -> N
             scheduled_at=EXPECTED_UTC,
             timezone="Invalid/Timezone",
         )
+
+
+def test_timezone_data_available_without_os_database(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """В slim-образе не обязана быть /usr/share/zoneinfo; tzdata wheel должна спасать."""
+    try:
+        with monkeypatch.context() as scope:
+            scope.setenv("PYTHONTZPATH", str(tmp_path))
+            reset_tzpath()
+            ZoneInfo.clear_cache()
+            assert resolve_user_timezone(None, MOSCOW) == MOSCOW
+            assert resolve_user_timezone("Europe", MOSCOW) == MOSCOW
+            assert convert_local_to_utc(LOCAL, MOSCOW) == EXPECTED_UTC
+            assert convert_utc_to_local(EXPECTED_UTC, MOSCOW).hour == 15
+    finally:
+        reset_tzpath()
+        ZoneInfo.clear_cache()

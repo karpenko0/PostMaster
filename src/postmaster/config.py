@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     def _check_timezone(cls, value: str) -> str:
         try:
             ZoneInfo(value)
-        except (ZoneInfoNotFoundError, ValueError):
+        except (ZoneInfoNotFoundError, ValueError, OSError):
             raise ValueError("неизвестный часовой пояс IANA") from None
         return value
 

@@ -6,7 +6,7 @@
 по текущему пользователю (SPEC-024).
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from postmaster.domain.post import Post
@@ -31,7 +31,7 @@ class PostService:
         return Post(
             owner_telegram_id=owner_telegram_id,
             photo_file_id=photo_file_id,
-            scheduled_at=scheduled_at,
+            scheduled_at=scheduled_at.astimezone(UTC),
             timezone=timezone,
             local_datetime=local_datetime,
         )

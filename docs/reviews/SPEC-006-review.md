@@ -1,32 +1,40 @@
-# Приёмка SPEC-006 — часовые зоны
+# Повторная проверка SPEC-006 — часовые зоны
 
-## Итог
+## Вывод
 
-Timezone-подсистема, разрешение пояса с fallback, local↔UTC, проверка будущего времени в UTC, передача timezone+UTC в сервисный контракт и обратный форматированный показ в существующем сценарии реализованы. **Полная приёмка SPEC-006 пока невозможна**: таблица `posts` и запись в неё относятся к SPEC-008/009, реальные задания Scheduler — к SPEC-010, `/my_posts` — SPEC-017, `/cancel` — SPEC-018.
+Проверены требования SPEC-006, вся доступная цепочка от Telegram до сервисного DTO, регрессия SPEC-001…005 и поведение без системной базы IANA. **SPEC-006 реализована частично**: преобразования работают, но полный DoD о сохранении и показе публикаций не может быть закрыт до SPEC-008/009/010/017/018.
 
-## Матрица требований
+В повторной проверке исправлены два пробела и усилен UTC-инвариант:
 
-| Требования | Проверки | Статус |
+1. В минимальной ОС без `/usr/share/zoneinfo` `ZoneInfo("Europe/Moscow")` не работает без IANA-базы: добавлен runtime-пакет `tzdata` и тест с пустым системным `PYTHONTZPATH`.
+2. С установленным `tzdata` некорректное значение `Europe` может вызвать `IsADirectoryError` вместо `ZoneInfoNotFoundError`. Валидатор конфигурации теперь возвращает `ConfigError`, resolver профиля подставляет `DEFAULT_TIMEZONE`; добавлены проверки обоих случаев.
+3. Дополнительно нулевое смещение зоны `Europe/London` зимой теперь нормализуется в `datetime.UTC` в DTO PostService, а не сохраняется с `tzinfo=Europe/London`.
+
+## Сверка с критериями
+
+| Требования | Что проверено | Статус |
 |---|---|---|
-| US-006-01/02/04, AC-006-01/02/03, BR-006-01…03, ERR-006-01/02, TC-006-01/03 | `test_local_to_utc_and_roundtrip`, `test_missing_or_invalid_user_timezone_falls_back`, `test_valid_user_timezone_overrides_default`, `test_profile_timezone_fallback_conversion_and_handoff` | ✅ Профиль / null / неверный пояс; дефолт из конфигурации, не литерал в сервисе |
-| US-006-03, AC-006-04, BR-006-08, TC-006-02 | `test_local_to_utc_and_roundtrip`, `test_utc_input_does_not_need_to_be_reinterpreted`, `test_profile_timezone_fallback_conversion_and_handoff` | ✅ UTC→local→строка для существующего ответа после даты; `/my_posts` ещё нет |
-| AC-006-05, BR-006-09, TC-006-04, IT-006-04 | `test_server_timezone_does_not_affect_conversion`, `test_profile_timezone_fallback_conversion_and_handoff` с `TZ=Pacific/Honolulu` | ✅ ОС и пользовательские часы различаются; TZ восстановлен после теста |
-| AC-006-06/07, BR-006-10, TC-006-05 | `test_future_check_is_made_in_utc`; регрессия `test_schedule_spec005.py` | ✅ `12:00 UTC` после `11:30 UTC` и до `12:30 UTC` |
-| BR-006-04…06, INV-006-01/04, §32 | `test_post_service_handoff_requires_utc_and_publication_timezone`, `test_profile_timezone_fallback_conversion_and_handoff` | ✅ Контракт DTO и вызов сервиса содержат UTC+timezone; **хранение posts в БД не проверено** |
-| BR-006-07, INV-006-02, §33 | `test_scheduler_configuration_uses_utc` | ✅ APScheduler настроен на UTC; **jobs ещё нет** |
-| IT-006-01, E2E §41–42 до точки вызова PostService | `test_profile_timezone_fallback_conversion_and_handoff`, регрессия `test_spec005_flow.py` | ✅ Telegram → users → дата → timezone → UTC → заглушка PostService |
-| AC-006-08/09, IT-006-02/03, E2E §41–42 после PostService | Нет модели/репозитория `posts` (SPEC-008/009) | ⏳ Нельзя утверждать о сохранённых полях в БД и обратном чтении публикации |
-| AC-006-10, BR-006-08/INV-006-05 для `/my_posts`, вывод `/cancel` | Команды относятся к SPEC-017/018 | ⏳ Есть общий конвертер, но этих экранов пока нет |
+| US-006-01/04, AC-006-01/02, BR-006-01…03, ERR-006-01/02, TC-006-03 | `test_missing_or_invalid_user_timezone_falls_back`, `test_profile_timezone_fallback_conversion_and_handoff`, тесты `UserService`/`Settings`; профиль, NULL, невалидное значение, приоритет профиля и конфигурационного дефолта | ✅ |
+| AC-006-03/04/05, TC-006-01/02/04 | `test_local_to_utc_and_roundtrip`, `test_iana_offsets_vary_by_date_without_using_server_timezone`, `test_server_timezone_does_not_affect_conversion` (UTC/Honolulu/Tokyo), `test_timezone_data_available_without_os_database` | ✅ API конвертации и форматирование существующего ответа |
+| AC-006-06/07, BR-006-09/10, TC-006-05 | `test_future_check_is_made_in_utc`, тесты SPEC-005: aware UTC сравнение, прошедший/равный момент | ✅ |
+| `users.timezone`, §11/12, BR-006-05 | Настоящая таблица `users.timezone`, чтение через UserRepository и UserService, ручная установка значения в интеграционных тестах | ✅ Хранение поля есть; UI для изменения пояса вне scope (SPEC-041) |
+| §32, INV-006-01/04 на уровне DTO | `test_post_service_handoff_requires_utc_and_publication_timezone`, `test_profile_timezone_fallback_conversion_and_handoff`: сервис отклоняет naive/non-UTC, принимает IANA-пояс и передаёт UTC+timezone; нулевое смещение нормализует в UTC | ✅ Контракт заглушки; **не** БД |
+| BR-006-07, INV-006-02, §33 | `test_scheduler_configuration_uses_utc`: APScheduler настроен на UTC | ◑ Реальных jobs ещё нет (SPEC-010), передачу задания проверить нельзя |
+| IT-006-01/04 | `test_profile_timezone_fallback_conversion_and_handoff` под `TZ=Pacific/Honolulu`: Telegram → users → SPEC-005 → UTC → PostService; DB snapshot не изменился | ✅ До точки передачи; не до сохранения |
+| US-006-02, BR-006-04/06, AC-006-08/09, IT-006-02/03, INV-006-01/04 **на уровне БД** | В репозитории отсутствует таблица `posts`/PostRepository и фактическое создание поста (SPEC-008/009) | ⏳ Нельзя доказать хранение UTC и timezone у публикации или обратное чтение |
+| US-006-03 для запланированных постов, AC-006-10, BR-006-08/INV-006-05 в `/my_posts`, показ `/cancel` | Есть общий конвертер и показ в существующем ответе после даты; `/my_posts` и `/cancel` отсутствуют (SPEC-017/018) | ◑ Конвертация готова, конечные команды — нет |
+| E2E-006-01/02 §41/42 | Успешный Telegram-flow только до временного DTO; нет записи posts, задания Scheduler и списка публикаций | ⏳ Полный E2E не выполнен |
 
-## Проверка качества
+## Проверки качества
 
-- Python **3.12.11**, весь проект: `python -m pytest -q -p no:cacheprovider` — **278 passed**.
-- `ruff check .` — без ошибок; `ruff format --check .` — 64 файла; `git diff --check` — без замечаний.
-- Проверка чувствительности: три временные мутации с восстановлением исходника — потеря fallback (7 failed), пометка локального времени как UTC (8 failed), пропуск обратной конвертации (5 failed).
-- Используется fake Telegram, не реальный `api.telegram.org`. Docker не запускался (в среде нет Docker).
+- Python **3.12.11**: `python -m pytest -q -p no:cacheprovider` → **281 passed** (fake Telegram API, без внешнего Telegram).
+- `ruff check .` → без ошибок; `ruff format --check .` → **64 файла**; `git diff --check` → без замечаний.
+- Приемочные тесты проверяют поведение без системной IANA-базы через `PYTHONTZPATH`, а также отдельные настройки TZ сервера. Пакет `tzdata` поставляется с приложением.
+- Ранее проверена чувствительность тестов временными мутациями: потеря fallback, подмена локального времени UTC, пропуск обратной конвертации — все обнаружены; после повторной проверки изменённый код прогнан полной регрессией.
+- Docker/Windows и реальный Telegram не запускались в этой среде.
 
-## Нерешённое в предоставленном ТЗ
+## Открытые ограничения
 
-SPEC-006 не задаёт политику для несуществующего или неоднозначного локального времени при DST-переходе (gap/fold). Не добавлено самодельное правило: для naive ввода применяется стандартное поведение `zoneinfo`, `fold=0`. До использования таких дат в реальных публикациях продукту потребуется явное решение по этому правилу.
-
-Даты в примерах `07.10.2026` на текущую дату уже прошли; тесты фиксируют `now=07.10.2026` при проверке будущего времени.
+1. SPEC-006 не задаёт политику для пропущенных/двусмысленных локальных часов при DST (gap/fold). Используется стандартное поведение `zoneinfo` с `fold=0`; необходимо отдельное продуктовое решение до поддержки таких дат в реальных публикациях.
+2. Заглушка PostService по SPEC-003 **не сохраняет** пост, но существующий ответ Telegram говорит «Публикация создана» и FSM возвращается в `IDLE`. Это вводит пользователя в заблуждение до реализации SPEC-009; сам текст не является доказательством создания публикации и должен быть приведён в соответствие с фактическим сохранением.
+3. Примеры от 07.10.2026 уже в прошлом; тесты примеров используют замороженное `now`, а реальный бот правильно отклонит их сегодня.

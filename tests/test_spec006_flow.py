@@ -23,6 +23,7 @@ from postmaster.services.scheduler_service import SchedulerService
     [
         (None, "Europe/Moscow", datetime(2026, 10, 7, 12, tzinfo=UTC)),
         ("Invalid/Timezone", "Europe/Moscow", datetime(2026, 10, 7, 12, tzinfo=UTC)),
+        ("Europe", "Europe/Moscow", datetime(2026, 10, 7, 12, tzinfo=UTC)),
         ("Asia/Tokyo", "Asia/Tokyo", datetime(2026, 10, 7, 6, tzinfo=UTC)),
     ],
 )
