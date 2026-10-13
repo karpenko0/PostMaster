@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -10,6 +11,7 @@ from harness import db_path, db_snapshot, draft_data, wait_for_state, wait_until
 from postmaster.app import Application
 from postmaster.domain.dialog import DialogState
 from postmaster.domain.photo import PhotoData
+from postmaster.domain.post import PostDraft
 from postmaster.handlers.dialog import INVALID_FORMAT_TEXT, PAST_DATETIME_TEXT
 from postmaster.services import dialog_service
 from postmaster.services.post_service import PostService
@@ -39,13 +41,24 @@ class Users:
     async def timezone_of(self, user_id: int) -> str:
         return "Europe/Moscow"
 
+    async def get_by_telegram_id(self, user_id: int):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(id=user_id)
+
 
 class Posts(PostService):
     def __init__(self) -> None:
         self.created = []
 
-    async def create_post(self, **kwargs):
-        result = await super().create_post(**kwargs)
+    async def create_scheduled_post(self, **kwargs):
+        result = PostDraft(
+            owner_telegram_id=kwargs["user_id"],
+            photo_file_id=kwargs["telegram_file_id"],
+            scheduled_at=kwargs["scheduled_at_utc"],
+            timezone=kwargs["timezone"],
+            local_datetime=kwargs["scheduled_at_utc"].astimezone(ZoneInfo(kwargs["timezone"])),
+        )
         self.created.append(result)
         return result
 
@@ -117,7 +130,7 @@ async def test_success_hands_utc_local_timezone_and_photo_to_next_service(
     assert result.parsed_datetime.utc_datetime == datetime(2026, 10, 7, 12, tzinfo=UTC)
     assert result.parsed_datetime.local_datetime.utcoffset() == timedelta(hours=3)
     assert result.parsed_datetime.timezone == "Europe/Moscow"
-    (post,) = posts.created  # сервис SPEC-009 пока возвращает DTO, не сохраняет запись
+    (post,) = posts.created  # тестовый дублёр PostService возвращает DTO для проверки передачи
     assert post.photo_file_id == "image"
     assert post.scheduled_at == result.parsed_datetime.utc_datetime
     assert post.local_datetime == result.parsed_datetime.local_datetime
@@ -157,12 +170,11 @@ async def test_telegram_error_then_correction_without_resending_photo(
 
     fake_telegram.add_text_message("07.10.2026 15:00", chat_id=42, user_id=42)
     await wait_until(lambda: len(fake_telegram.sent_messages) == 5)
-    assert fake_telegram.sent_messages[4]["text"].startswith(
-        "Публикация создана на 07.10.2026 15:00 (Europe/Moscow)"
-    )
+    assert "📅 7 октября 2026\n⏰ 15:00" in fake_telegram.sent_messages[4]["text"]
     await wait_for_state(running_app, 42, DialogState.IDLE)
-    # Таблица posts создана в SPEC-008, подключение записи к диалогу остаётся SPEC-009.
-    assert db_snapshot(db_path(tmp_path)) == before
+    posts = db_snapshot(db_path(tmp_path))["posts"]
+    assert len(posts) == len(before["posts"]) + 1
+    assert posts[-1][6] == "PENDING"
 
 
 def test_user_messages_match_spec() -> None:
@@ -199,5 +211,5 @@ async def test_telegram_prefers_timezone_saved_in_user_profile(
 
     fake_telegram.add_text_message("07.10.2026 15:00", chat_id=42, user_id=42)
     await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
-    assert "15:00 (Asia/Tokyo)" in fake_telegram.sent_messages[2]["text"]
+    assert "📅 7 октября 2026\n⏰ 15:00" in fake_telegram.sent_messages[2]["text"]
     await wait_for_state(running_app, 42, DialogState.IDLE)

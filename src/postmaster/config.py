@@ -11,7 +11,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
-from pydantic import Field, SecretStr, ValidationError, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///data/postmaster.db"
@@ -44,6 +44,22 @@ class Settings(BaseSettings):
         default=DEFAULT_TIMEZONE,
         description="Часовой пояс по умолчанию, IANA, например Europe/Moscow (DEFAULT_TIMEZONE).",
     )
+    post_mode: Literal["REMINDER", "TELEGRAM"] = Field(
+        default="REMINDER",
+        description="Тип новых публикаций для текущего диалога (POST_MODE).",
+    )
+    telegram_target_id: str | None = Field(
+        default=None,
+        description="Канал для режима TELEGRAM (TELEGRAM_TARGET_ID).",
+    )
+
+    @model_validator(mode="after")
+    def _check_post_mode(self) -> "Settings":
+        if self.post_mode == "TELEGRAM" and (
+            not self.telegram_target_id or not self.telegram_target_id.strip()
+        ):
+            raise ValueError("TELEGRAM_TARGET_ID обязателен для POST_MODE=TELEGRAM")
+        return self
 
     @field_validator("bot_token")
     @classmethod

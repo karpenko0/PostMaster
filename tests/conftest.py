@@ -15,7 +15,14 @@ from postmaster.bot.factory import close_bot_session
 from postmaster.config import Settings
 
 # Переменные настроек. Тесты очищают их, потому что load_dotenv() пишет в os.environ.
-SETTINGS_ENV_NAMES = ("BOT_TOKEN", "DATABASE_URL", "LOG_LEVEL", "DEFAULT_TIMEZONE")
+SETTINGS_ENV_NAMES = (
+    "BOT_TOKEN",
+    "DATABASE_URL",
+    "LOG_LEVEL",
+    "DEFAULT_TIMEZONE",
+    "POST_MODE",
+    "TELEGRAM_TARGET_ID",
+)
 
 
 @pytest.fixture

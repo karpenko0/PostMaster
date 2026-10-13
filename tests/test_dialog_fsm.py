@@ -19,9 +19,10 @@ START = DialogEvent.START
 PHOTO = DialogEvent.PHOTO
 VALID_DATETIME = DialogEvent.VALID_DATETIME
 
-# Утверждённый сценарий из FSM-контракта §5 и правил BR-01…BR-04. Всё остальное запрещено.
+# FSM-контракт SPEC-003 и расширение SPEC-009: новое фото из IDLE начинает сценарий.
 SCENARIO = {
     (IDLE, START): WAITING_PHOTO,
+    (IDLE, PHOTO): WAITING_DATETIME,
     (WAITING_PHOTO, START): WAITING_PHOTO,
     (WAITING_DATETIME, START): WAITING_PHOTO,
     (WAITING_PHOTO, PHOTO): WAITING_DATETIME,

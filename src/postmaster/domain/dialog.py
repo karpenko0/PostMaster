@@ -32,6 +32,8 @@ TRANSITIONS: dict[tuple[DialogState, DialogEvent], DialogState] = {
     (DialogState.IDLE, DialogEvent.START): DialogState.WAITING_PHOTO,
     (DialogState.WAITING_PHOTO, DialogEvent.START): DialogState.WAITING_PHOTO,
     (DialogState.WAITING_DATETIME, DialogEvent.START): DialogState.WAITING_PHOTO,
+    # SPEC-009 §32: после завершения новая фотография начинает новый сценарий.
+    (DialogState.IDLE, DialogEvent.PHOTO): DialogState.WAITING_DATETIME,
     # BR-02: фото принимается на шаге ожидания фотографии.
     (DialogState.WAITING_PHOTO, DialogEvent.PHOTO): DialogState.WAITING_DATETIME,
     # BR-04: новое фото на шаге даты заменяет предыдущее, состояние остаётся прежним.

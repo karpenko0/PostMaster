@@ -14,6 +14,7 @@ from telebot.util import content_type_media
 
 from postmaster.domain.dialog import DialogState
 from postmaster.domain.photo import PhotoProcessingError
+from postmaster.domain.post import PublicationType
 from postmaster.domain.schedule import DATETIME_EXAMPLE, DateTimeErrorCode
 from postmaster.domain.timezone import convert_utc_to_local
 from postmaster.services.dialog_service import DialogOutcome, DialogOutcomeKind, DialogService
@@ -53,6 +54,21 @@ HINT_BY_STATE: dict[DialogState, str] = {
     DialogState.WAITING_DATETIME: f"Сейчас ждём дату публикации. {DATE_PROMPT}",
 }
 
+_MONTHS = (
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
+
 # Все типы медиа, кроме текста и фото: они обрабатываются отдельно.
 OTHER_CONTENT_TYPES = [kind for kind in content_type_media if kind not in ("text", "photo")]
 
@@ -71,17 +87,28 @@ def reply_text(outcome: DialogOutcome) -> str:
                 else INVALID_FORMAT_TEXT
             )
         case DialogOutcomeKind.POST_CREATED:
-            if outcome.parsed_datetime is not None:
-                local = convert_utc_to_local(
-                    outcome.parsed_datetime.utc_datetime, outcome.parsed_datetime.timezone
+            if outcome.post is None:
+                raise ValueError("подтверждение без сохранённого Post")
+            local = convert_utc_to_local(outcome.post.scheduled_at_utc, outcome.post.timezone)
+            date = f"{local.day} {_MONTHS[local.month - 1]} {local.year}"
+            clock = local.strftime("%H:%M")
+            if outcome.post.publication_type == PublicationType.REMINDER:
+                return (
+                    "✅ Принято!\n\nФото запланировано:\n"
+                    f"📅 {date}\n⏰ {clock}\n\nЯ напомню тебе точно в это время."
                 )
-            else:
-                local = outcome.scheduled_at
-            when = local.strftime("%d.%m.%Y %H:%M") if local else ""
             return (
-                f"Публикация создана на {when} ({outcome.zone_name}). "
-                "Чтобы создать новую, отправьте /start."
+                "✅ Запланировано!\n\n"
+                f"📅 {date}\n⏰ {clock}\n\n"
+                "Фото будет автоматически опубликовано в канале."
             )
+        case DialogOutcomeKind.POST_SAVED_UNSCHEDULED:
+            return (
+                "⚠️ Публикация сохранена, но пока не поставлена в расписание. "
+                "Повторно создавать её не нужно; задача будет восстановлена позже."
+            )
+        case DialogOutcomeKind.POST_FAILED:
+            return "⚠️ Не удалось сохранить публикацию. Повтори дату позже; фото сохранено."
         case DialogOutcomeKind.INVALID_MESSAGE:
             return HINT_BY_STATE[outcome.state]
         case _:

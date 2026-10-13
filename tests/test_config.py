@@ -77,6 +77,23 @@ def test_token_is_hidden_in_repr_str_and_json(
     assert TEST_TOKEN not in settings.model_dump_json()
 
 
+def test_post_mode_defaults_and_telegram_target_validation(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BOT_TOKEN", TEST_TOKEN)
+    assert load_settings(env_file=None).post_mode == "REMINDER"
+    monkeypatch.setenv("POST_MODE", "TELEGRAM")
+    with pytest.raises(ConfigError, match="TELEGRAM_TARGET_ID"):
+        load_settings(env_file=None)
+    monkeypatch.setenv("TELEGRAM_TARGET_ID", "-1001234567890")
+    settings = load_settings(env_file=None)
+    assert settings.post_mode == "TELEGRAM"
+    assert settings.telegram_target_id == "-1001234567890"
+    monkeypatch.setenv("POST_MODE", "VK")
+    with pytest.raises(ConfigError, match="POST_MODE"):
+        load_settings(env_file=None)
+
+
 def test_missing_token_raises_config_error_naming_the_field(clean_env: None) -> None:
     with pytest.raises(ConfigError) as info:
         load_settings(env_file=None)

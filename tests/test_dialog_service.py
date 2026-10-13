@@ -7,6 +7,7 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -111,6 +112,9 @@ class FakeUsers:
     async def timezone_of(self, telegram_user_id: int) -> str:
         return self.zone
 
+    async def get_by_telegram_id(self, telegram_user_id: int) -> SimpleNamespace:
+        return SimpleNamespace(id=telegram_user_id)
+
 
 class RecordingPostService(PostService):
     """Запоминает созданные публикации. Может имитировать сбой записи."""
@@ -119,17 +123,14 @@ class RecordingPostService(PostService):
         self.created: list[PostDraft] = []
         self.fail_with: Exception | None = None
 
-    async def create_post(
-        self, *, owner_telegram_id, photo_file_id, scheduled_at, timezone=None, local_datetime=None
-    ) -> PostDraft:
+    async def create_scheduled_post(self, **kwargs) -> PostDraft:  # type: ignore[override]
         if self.fail_with is not None:
             raise self.fail_with
-        post = await super().create_post(
-            owner_telegram_id=owner_telegram_id,
-            photo_file_id=photo_file_id,
-            scheduled_at=scheduled_at,
-            timezone=timezone,
-            local_datetime=local_datetime,
+        post = PostDraft(
+            owner_telegram_id=kwargs["user_id"],
+            photo_file_id=kwargs["telegram_file_id"],
+            scheduled_at=kwargs["scheduled_at_utc"],
+            timezone=kwargs["timezone"],
         )
         self.created.append(post)
         return post
@@ -318,8 +319,8 @@ async def test_failed_post_creation_keeps_draft_for_retry(
     await service.receive_photo(USER, CHAT, photo("photo-1"))
     posts.fail_with = RuntimeError("сбой сохранения")
 
-    with pytest.raises(RuntimeError, match="сбой сохранения"):
-        await service.receive_text(USER, CHAT, future_date_text())
+    failed = await service.receive_text(USER, CHAT, future_date_text())
+    assert failed.kind == DialogOutcomeKind.POST_FAILED
 
     assert store.states[USER, CHAT] == WAITING_DATETIME
     assert store.drafts[USER, CHAT] == draft_of("photo-1")
@@ -336,7 +337,6 @@ async def test_failed_post_creation_keeps_draft_for_retry(
     [
         ("IDLE", "text"),
         ("IDLE", "date"),
-        ("IDLE", "photo"),
         ("IDLE", "other"),
         ("WAITING_PHOTO", "text"),
         ("WAITING_PHOTO", "date"),

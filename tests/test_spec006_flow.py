@@ -1,4 +1,4 @@
-"""IT-006-01/04: реальный профиль users → date parser → UTC → заглушка PostService."""
+"""IT-006-01/04: профиль users → date parser → UTC → сохранённый Post."""
 
 import os
 import time
@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import update
 
 from fake_telegram import FakeTelegram
-from harness import db_path, db_snapshot, wait_for_state, wait_until
+from harness import db_path, db_snapshot, users_rows, wait_for_state, wait_until
 from postmaster.app import Application
 from postmaster.database.models import UserModel
 from postmaster.domain.dialog import DialogState
@@ -38,14 +38,14 @@ async def test_profile_timezone_fallback_conversion_and_handoff(
 ) -> None:
     # Окружение сервера намеренно не совпадает с поясом пользователя.
     previous_tz = os.environ.get("TZ")
-    original_create = PostService.create_post
+    original_create = PostService.create_scheduled_post
     received: list[dict[str, object]] = []
 
     async def record_create(self: PostService, **kwargs):
         received.append(kwargs)
         return await original_create(self, **kwargs)
 
-    monkeypatch.setattr(PostService, "create_post", record_create)
+    monkeypatch.setattr(PostService, "create_scheduled_post", record_create)
     monkeypatch.setattr(dialog_service, "utc_now", lambda: datetime(2026, 10, 7, 5, 30, tzinfo=UTC))
     try:
         if hasattr(time, "tzset"):
@@ -67,14 +67,17 @@ async def test_profile_timezone_fallback_conversion_and_handoff(
         fake_telegram.add_text_message("07.10.2026 15:00", chat_id=42, user_id=42)
         await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
         await wait_for_state(running_app, 42, DialogState.IDLE)
-        assert f"15:00 ({resolved_timezone})" in fake_telegram.sent_messages[2]["text"]
+        assert "📅 7 октября 2026\n⏰ 15:00" in fake_telegram.sent_messages[2]["text"]
         assert len(received) == 1
-        assert received[0]["scheduled_at"] == scheduled_utc
+        assert received[0]["scheduled_at_utc"] == scheduled_utc
         assert received[0]["timezone"] == resolved_timezone
-        assert received[0]["local_datetime"].astimezone(UTC) == scheduled_utc
-        assert received[0]["photo_file_id"] == "image"
-        # Таблица posts уже есть, но диалог не сохраняет пост до SPEC-009; Scheduler-job — позже.
-        assert db_snapshot(db_path(tmp_path)) == before
+        assert received[0]["telegram_file_id"] == "image"
+        assert received[0]["telegram_file_unique_id"] == "image-l"
+        assert received[0]["user_id"] == users_rows(db_path(tmp_path), 42)[0][0]
+        posts = db_snapshot(db_path(tmp_path))["posts"]
+        assert len(posts) == len(before["posts"]) + 1
+        assert posts[-1][4].startswith(scheduled_utc.strftime("%Y-%m-%d %H:%M"))
+        assert posts[-1][5] == resolved_timezone
     finally:
         if hasattr(time, "tzset"):
             if previous_tz is None:

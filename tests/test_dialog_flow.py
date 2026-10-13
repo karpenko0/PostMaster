@@ -61,11 +61,12 @@ async def test_full_scenario_creates_post_and_returns_to_idle(
     assert "ДД.ММ.ГГГГ ЧЧ:ММ" in fake_telegram.sent_messages[1]["text"]
     await wait_for_state(running_app, 42, WAITING_DATETIME)
 
-    fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
+    date_text = future_date_text()
+    fake_telegram.add_text_message(date_text, chat_id=42, user_id=42)
     await _reply_count(fake_telegram, 3)
     created = fake_telegram.sent_messages[2]["text"]
-    assert created.startswith("Публикация создана на ")
-    assert "(Europe/Moscow)" in created
+    assert created.startswith("✅ Принято!\n\nФото запланировано:")
+    assert f"⏰ {date_text[-5:]}" in created
     await wait_for_state(running_app, 42, IDLE)
 
 

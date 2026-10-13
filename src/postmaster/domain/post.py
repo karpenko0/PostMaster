@@ -1,4 +1,4 @@
-"""Публикация SPEC-008 и временный черновик сценария SPEC-003 до SPEC-009."""
+"""Публикация SPEC-008 и совместимый DTO ранних сценариев SPEC-003/006."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -97,7 +97,7 @@ class Post:
 
 @dataclass(frozen=True, slots=True)
 class PostDraft:
-    """Прежняя заглушка диалога: не сохраняется в posts до SPEC-009."""
+    """Совместимый DTO SPEC-003/006; рабочий диалог SPEC-009 возвращает сохранённый Post."""
 
     owner_telegram_id: int
     photo_file_id: str

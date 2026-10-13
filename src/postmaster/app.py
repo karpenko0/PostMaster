@@ -25,7 +25,9 @@ from postmaster.database.engine import (
     create_session_factory,
 )
 from postmaster.database.schema import create_schema
+from postmaster.domain.post import PublicationType
 from postmaster.handlers.registry import register_handlers
+from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.dialog_service import DialogService
 from postmaster.services.photo_service import PhotoService
@@ -82,11 +84,15 @@ class Application:
             UserRepository(session_factory),
             default_timezone=settings.default_timezone,
         )
+        post_repository = PostRepository(session_factory)
+        scheduler = SchedulerService(post_repository)
         bot = create_bot(settings.bot_token.get_secret_value())
         dialog_service = DialogService(
             TelebotDialogStore(bot),
             user_service=user_service,
-            post_service=PostService(),
+            post_service=PostService(post_repository, scheduler),
+            publication_type=PublicationType(settings.post_mode),
+            target_id=settings.telegram_target_id,
         )
         register_handlers(
             bot,
@@ -97,7 +103,7 @@ class Application:
         return cls(
             bot=bot,
             engine=engine,
-            scheduler=SchedulerService(),
+            scheduler=scheduler,
             transport=PollingTransport(bot),
         )
 
