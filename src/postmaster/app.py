@@ -27,11 +27,16 @@ from postmaster.database.engine import (
 from postmaster.database.schema import create_schema
 from postmaster.domain.post import PublicationType
 from postmaster.handlers.registry import register_handlers
+from postmaster.publishers.base import BotTelegramClient
+from postmaster.publishers.reminder import ReminderPublisher
+from postmaster.publishers.resolver import PublisherResolver
+from postmaster.publishers.telegram import TelegramPublisher
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.dialog_service import DialogService
 from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
+from postmaster.services.publication_service import PublicationService
 from postmaster.services.scheduler_service import SchedulerService
 from postmaster.services.user_service import UserService
 from postmaster.utils.logging_config import configure_logging
@@ -80,13 +85,31 @@ class Application:
         """Создаёт боевую конфигурацию из настроек. Сеть на этом шаге не используется."""
         engine = create_database_engine(settings.database_url)
         session_factory = create_session_factory(engine)
+        user_repository = UserRepository(session_factory)
         user_service = UserService(
-            UserRepository(session_factory),
+            user_repository,
             default_timezone=settings.default_timezone,
         )
         post_repository = PostRepository(session_factory)
-        scheduler = SchedulerService(post_repository)
         bot = create_bot(settings.bot_token.get_secret_value())
+        telegram_client = BotTelegramClient(bot)
+        reminder_publisher = ReminderPublisher(
+            telegram_client=telegram_client,
+            user_repository=user_repository,
+        )
+        telegram_publisher = TelegramPublisher(
+            telegram_client=telegram_client,
+            secrets=(settings.bot_token.get_secret_value(),),
+        )
+        publisher_resolver = PublisherResolver(
+            reminder_publisher=reminder_publisher,
+            telegram_publisher=telegram_publisher,
+        )
+        publication_service = PublicationService(
+            post_repository,
+            publisher_resolver=publisher_resolver,
+        )
+        scheduler = SchedulerService(post_repository, publication_service)
         dialog_service = DialogService(
             TelebotDialogStore(bot),
             user_service=user_service,

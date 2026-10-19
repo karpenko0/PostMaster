@@ -18,6 +18,7 @@ from postmaster.domain.post import (
     Post,
     PostNotFoundError,
     PostStatus,
+    PublicationErrorCode,
     PublicationType,
     UserNotFoundError,
 )
@@ -186,6 +187,138 @@ class PostRepository:
         else:
             logger.info("Post status changed id=%s %s->%s", post_id, old, target)
         return post
+
+    async def claim_post_for_processing(
+        self,
+        post_id: int,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Атомарный захват PENDING → PROCESSING без предварительного SELECT (SPEC-013 §13–16)."""
+        stamp = _to_storage(now if now is not None else utc_now(), "now")
+        async with self._session_factory() as session, session.begin():
+            result = await session.execute(
+                update(PostModel)
+                .where(
+                    PostModel.id == post_id,
+                    PostModel.status == PostStatus.PENDING.value,
+                )
+                .values(
+                    status=PostStatus.PROCESSING.value,
+                    updated_at=stamp,
+                )
+            )
+        if result.rowcount == 1:
+            logger.info("Post claimed for processing post_id=%s", post_id)
+            return True
+        logger.info("Post claim skipped post_id=%s", post_id)
+        return False
+
+    async def mark_published(
+        self,
+        post_id: int,
+        published_at: datetime | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Фиксирует успех PROCESSING → PUBLISHED и очищает error_message (SPEC-013 §21–24)."""
+        effective_published = (
+            published_at if published_at is not None else (now if now is not None else utc_now())
+        )
+        effective_updated = now if now is not None else effective_published
+        published_stamp = _to_storage(effective_published, "published_at")
+        updated_stamp = _to_storage(effective_updated, "now")
+        async with self._session_factory() as session, session.begin():
+            result = await session.execute(
+                update(PostModel)
+                .where(
+                    PostModel.id == post_id,
+                    PostModel.status == PostStatus.PROCESSING.value,
+                )
+                .values(
+                    status=PostStatus.PUBLISHED.value,
+                    published_at=published_stamp,
+                    error_message=None,
+                    updated_at=updated_stamp,
+                )
+            )
+        if result.rowcount == 1:
+            logger.info("Post published post_id=%s", post_id)
+            return True
+        logger.error(
+            "Final status update failed post_id=%s target=PUBLISHED code=%s",
+            post_id,
+            PublicationErrorCode.FINAL_STATUS_UPDATE_FAILED.value,
+        )
+        return False
+
+    async def mark_failed(
+        self,
+        post_id: int,
+        error_message: str,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Фиксирует окончательную ошибку PROCESSING → FAILED (SPEC-013 §25–27)."""
+        if not isinstance(error_message, str) or not error_message.strip():
+            raise ValueError("error_message обязателен")
+        updated_stamp = _to_storage(now if now is not None else utc_now(), "now")
+        async with self._session_factory() as session, session.begin():
+            result = await session.execute(
+                update(PostModel)
+                .where(
+                    PostModel.id == post_id,
+                    PostModel.status == PostStatus.PROCESSING.value,
+                )
+                .values(
+                    status=PostStatus.FAILED.value,
+                    error_message=error_message,
+                    published_at=None,
+                    updated_at=updated_stamp,
+                )
+            )
+        if result.rowcount == 1:
+            logger.error("Post publication failed post_id=%s", post_id)
+            return True
+        logger.error(
+            "Final status update failed post_id=%s target=FAILED code=%s",
+            post_id,
+            PublicationErrorCode.FINAL_STATUS_UPDATE_FAILED.value,
+        )
+        return False
+
+    async def release_post_for_retry(
+        self,
+        post_id: int,
+        error_message: str | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Возвращает публикацию PROCESSING → PENDING при временной ошибке (SPEC-013 §28–30)."""
+        updated_stamp = _to_storage(now if now is not None else utc_now(), "now")
+        async with self._session_factory() as session, session.begin():
+            result = await session.execute(
+                update(PostModel)
+                .where(
+                    PostModel.id == post_id,
+                    PostModel.status == PostStatus.PROCESSING.value,
+                )
+                .values(
+                    status=PostStatus.PENDING.value,
+                    error_message=error_message,
+                    published_at=None,
+                    updated_at=updated_stamp,
+                )
+            )
+        if result.rowcount == 1:
+            logger.warning("Post returned to pending for retry post_id=%s", post_id)
+            return True
+        logger.error(
+            "Final status update failed post_id=%s target=PENDING code=%s",
+            post_id,
+            PublicationErrorCode.FINAL_STATUS_UPDATE_FAILED.value,
+        )
+        return False
 
     async def cancel_post(self, post_id: int, user_id: int, *, now: datetime | None = None) -> bool:
         """Отмена только собственного PENDING по одному условному UPDATE (RT-008-05)."""

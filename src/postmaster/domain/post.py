@@ -31,6 +31,21 @@ class InvalidPostTransitionError(ValueError):
     """Переход статуса не описан в SPEC-008 §42–43."""
 
 
+class PublicationErrorCode(StrEnum):
+    """Коды ошибок и состояний выполнения публикации (SPEC-013 §47)."""
+
+    CLAIM_FAILED = "CLAIM_FAILED"
+    POST_NOT_FOUND_AFTER_CLAIM = "POST_NOT_FOUND_AFTER_CLAIM"
+    FINAL_STATUS_UPDATE_FAILED = "FINAL_STATUS_UPDATE_FAILED"
+
+
+class TemporaryPublicationError(Exception):
+    """Временная ошибка внешней публикации, допускающая возврат в PENDING (SPEC-013 §28)."""
+
+    retryable: bool = True
+    is_temporary: bool = True
+
+
 ALLOWED_TRANSITIONS: dict[PostStatus, frozenset[PostStatus]] = {
     PostStatus.PENDING: frozenset({PostStatus.PROCESSING, PostStatus.CANCELLED}),
     PostStatus.PROCESSING: frozenset({PostStatus.PUBLISHED, PostStatus.FAILED, PostStatus.PENDING}),
