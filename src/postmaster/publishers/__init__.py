@@ -1,4 +1,4 @@
-"""Публикация постов на внешних площадках (BR-03, SPEC-014, SPEC-015)."""
+"""Публикация постов на внешних площадках (BR-03, SPEC-014, SPEC-015, SPEC-016)."""
 
 from postmaster.publishers.base import (
     BotTelegramClient,
@@ -11,12 +11,24 @@ from postmaster.publishers.reminder import (
     ReminderErrorCode,
     ReminderPublisher,
 )
+from postmaster.publishers.resolver import (
+    InvalidPublicationTypeError,
+    PublisherNotFoundError,
+    PublisherResolutionError,
+    PublisherResolver,
+    PublisherResolverErrorCode,
+)
 from postmaster.publishers.telegram import TelegramErrorCode, TelegramPublisher
 
 __all__ = [
     "BotTelegramClient",
+    "InvalidPublicationTypeError",
     "PublishResult",
     "Publisher",
+    "PublisherNotFoundError",
+    "PublisherResolutionError",
+    "PublisherResolver",
+    "PublisherResolverErrorCode",
     "REMINDER_TEXT",
     "ReminderErrorCode",
     "ReminderPublisher",

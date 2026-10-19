@@ -12,8 +12,9 @@ Telegram-бот для отложенных публикаций фотогра�
 ([SPEC-007](docs/specs/SPEC-007.md)), а также таблица и репозиторий публикаций
 (SPEC-008), их сохранение из диалога с регистрацией задания (SPEC-009), защита
 от двойной публикации через atomic claim ([SPEC-013](docs/specs/SPEC-013.md)),
-отправка напоминания владельцу поста ([SPEC-014](docs/specs/SPEC-014.md)) и
-автопубликация в Telegram-канал ([SPEC-015](docs/specs/SPEC-015.md)).
+отправка напоминания владельцу поста ([SPEC-014](docs/specs/SPEC-014.md)),
+автопубликация в Telegram-канал ([SPEC-015](docs/specs/SPEC-015.md)) и единая
+абстракция `Publisher` с `PublisherResolver` ([SPEC-016](docs/specs/SPEC-016.md)).
 Остальные команды появятся в следующих спецификациях.
 
 ## Требования
@@ -135,7 +136,7 @@ mkdir -p data && sudo chown -R 1000:1000 data
 | `bot`          | Клиент Telegram, транспорт обновлений (Long Polling), хранилище состояния диалога |
 | `handlers`     | Telegram-обработчики. Только разбор сообщения и вызов сервиса     |
 | `services`     | Бизнес-логика: `DialogService`, `UserService`, `PhotoService`, `PostService`, `PublicationService`, `SchedulerService` |
-| `publishers`   | Интерфейс `Publisher`, `PublishResult`, `TelegramClient` и реализации `ReminderPublisher` (SPEC-014), `TelegramPublisher` (SPEC-015) |
+| `publishers`   | Интерфейс `Publisher`, `PublishResult`, `PublisherResolver` (SPEC-016), `TelegramClient` и реализации `ReminderPublisher` (SPEC-014), `TelegramPublisher` (SPEC-015) |
 | `repositories` | Доступ к данным. Единственное место с запросами к БД              |
 | `domain`       | Доменные модели без зависимостей от Telegram и БД                 |
 | `database`     | Движок SQLAlchemy, сессии, базовый класс моделей                  |

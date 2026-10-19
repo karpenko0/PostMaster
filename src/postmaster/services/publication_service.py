@@ -1,13 +1,15 @@
-"""PublicationService: идемпотентное выполнение публикации с atomic claim (SPEC-013, SPEC-014).
+"""PublicationService: идемпотентное выполнение публикации с atomic claim (SPEC-013…016).
 
 Любой источник запуска (Scheduler, Recovery, Missed Job) вызывает PublicationService.execute,
 не переводя Post в PROCESSING самостоятельно (§19). Право на вызов Publisher получает только
 обработчик, чей условный UPDATE перевёл запись из PENDING в PROCESSING (BR-013-01…10).
+Выбор конкретной реализации Publisher выполняется через PublisherResolver (SPEC-016 §13–16).
 """
 
 import logging
 from collections.abc import Callable, Mapping
 from datetime import datetime
+from typing import Any
 
 from postmaster.domain.post import (
     Post,
@@ -16,6 +18,7 @@ from postmaster.domain.post import (
     TemporaryPublicationError,
 )
 from postmaster.publishers.base import Publisher, PublishResult
+from postmaster.publishers.resolver import PublisherNotFoundError, PublisherResolver
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.utils.clock import utc_now
 
@@ -35,33 +38,53 @@ class PublishResultError(Exception):
 
 
 class PublicationService:
-    """Запуск публикации поста и атомарное обновление его статуса (SPEC-013, SPEC-014)."""
+    """Запуск публикации поста и атомарное обновление его статуса (SPEC-013…016)."""
 
     def __init__(
         self,
         post_repository: PostRepository | None = None,
-        publisher: Publisher | Mapping[PublicationType | str, Publisher] | None = None,
+        publisher: Publisher
+        | PublisherResolver
+        | Mapping[PublicationType | str, Publisher]
+        | None = None,
         *,
+        publisher_resolver: PublisherResolver | None = None,
         publishers: Mapping[PublicationType | str, Publisher] | None = None,
         is_temporary_error: Callable[[BaseException], bool] | None = None,
         now_fn: Callable[[], datetime] = utc_now,
     ) -> None:
         self._repository = post_repository
         self._default_publisher: Publisher | None = None
-        self._publishers: dict[PublicationType, Publisher] = {}
-        if isinstance(publisher, Mapping):
-            for key, value in publisher.items():
-                self._publishers[PublicationType(key)] = value
+        self._resolver: PublisherResolver | None = publisher_resolver
+
+        if isinstance(publisher, PublisherResolver):
+            self._resolver = publisher
+        elif isinstance(publisher, Mapping):
+            if self._resolver is None:
+                self._resolver = PublisherResolver(publishers=publisher)
+            else:
+                for key, value in publisher.items():
+                    self._resolver.register(key, value)
         elif publisher is not None:
             self._default_publisher = publisher
+
         if publishers is not None:
-            for key, value in publishers.items():
-                self._publishers[PublicationType(key)] = value
+            if self._resolver is None:
+                self._resolver = PublisherResolver(publishers=publishers)
+            else:
+                for key, value in publishers.items():
+                    self._resolver.register(key, value)
+
         self._is_temporary_error = is_temporary_error
         self._now_fn = now_fn
 
+    @property
+    def publisher_resolver(self) -> PublisherResolver | None:
+        """Возвращает подключённый PublisherResolver (SPEC-016 §13, §16)."""
+        return self._resolver
+
     async def execute(self, post_id: int) -> bool:
-        """Атомарно захватывает PENDING-пост, публикует его и фиксирует финальный статус."""
+        """Атомарно захватывает PENDING-пост, выбирает Publisher, публикует и меняет статус."""
         if self._repository is None:
             raise RuntimeError("PublicationService требует PostRepository")
 
@@ -112,11 +135,19 @@ class PublicationService:
 
     execute_post = execute
 
-    def _resolve_publisher(self, post: Post) -> Publisher:
-        publisher = self._publishers.get(post.publication_type) or self._default_publisher
-        if publisher is None:
-            raise RuntimeError(f"Publisher для типа {post.publication_type.value} не настроен")
-        return publisher
+    def _resolve_publisher(self, post: Post | Any) -> Publisher:
+        publication_type = getattr(post, "publication_type", None)
+        post_id = getattr(post, "id", None)
+        if self._resolver is not None:
+            try:
+                return self._resolver.resolve(publication_type, post_id=post_id)
+            except PublisherNotFoundError:
+                if self._default_publisher is not None:
+                    return self._default_publisher
+                raise
+        if self._default_publisher is not None:
+            return self._default_publisher
+        raise PublisherNotFoundError(publication_type)
 
     def _is_temporary(self, exc: BaseException) -> bool:
         if self._is_temporary_error is not None:

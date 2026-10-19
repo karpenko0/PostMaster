@@ -29,6 +29,7 @@ from postmaster.domain.post import PublicationType
 from postmaster.handlers.registry import register_handlers
 from postmaster.publishers.base import BotTelegramClient
 from postmaster.publishers.reminder import ReminderPublisher
+from postmaster.publishers.resolver import PublisherResolver
 from postmaster.publishers.telegram import TelegramPublisher
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
@@ -100,12 +101,13 @@ class Application:
             telegram_client=telegram_client,
             secrets=(settings.bot_token.get_secret_value(),),
         )
+        publisher_resolver = PublisherResolver(
+            reminder_publisher=reminder_publisher,
+            telegram_publisher=telegram_publisher,
+        )
         publication_service = PublicationService(
             post_repository,
-            publishers={
-                PublicationType.REMINDER: reminder_publisher,
-                PublicationType.TELEGRAM: telegram_publisher,
-            },
+            publisher_resolver=publisher_resolver,
         )
         scheduler = SchedulerService(post_repository, publication_service)
         dialog_service = DialogService(
