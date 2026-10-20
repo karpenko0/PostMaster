@@ -61,7 +61,7 @@ def _is_invalid_file_id_error(exc: BaseException) -> bool:
 
 
 def _is_temporary_telegram_error(exc: BaseException) -> bool:
-    if isinstance(exc, (TemporaryPublicationError, TimeoutError, ConnectionError)):
+    if isinstance(exc, TemporaryPublicationError | TimeoutError | ConnectionError):
         return True
     if bool(getattr(exc, "is_temporary", False) or getattr(exc, "retryable", False)):
         return True
