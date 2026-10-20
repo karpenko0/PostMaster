@@ -9,6 +9,7 @@ from telebot.async_telebot import AsyncTeleBot
 
 from postmaster.handlers.cancel import register_cancel_handler
 from postmaster.handlers.dialog import register_dialog_handlers
+from postmaster.handlers.help import register_help_handler
 from postmaster.handlers.my_posts import register_my_posts_handler
 from postmaster.handlers.start import register_start_handler
 from postmaster.services.dialog_service import DialogService
@@ -31,4 +32,5 @@ def register_handlers(
     register_start_handler(bot, user_service, dialog_service)
     register_my_posts_handler(bot, post_query_service)
     register_cancel_handler(bot, cancellation_service)
+    register_help_handler(bot)
     register_dialog_handlers(bot, dialog_service, photo_service)
