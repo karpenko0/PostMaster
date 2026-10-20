@@ -41,6 +41,12 @@ class BotTelegramClient:
     def __init__(self, bot: AsyncTeleBot) -> None:
         self._bot = bot
 
+    @property
+    def token(self) -> str | None:
+        """Токен доступен только DI для redaction; он никогда не логируется."""
+        token = getattr(self._bot, "token", None)
+        return token if isinstance(token, str) else None
+
     async def send_message(self, chat_id: str | int, text: str) -> Any:
         return await self._bot.send_message(chat_id=chat_id, text=text)
 

@@ -1,4 +1,4 @@
-"""Публикация постов на внешних площадках (BR-03, SPEC-014, SPEC-015, SPEC-016)."""
+"""Публикация постов на внешних площадках (BR-03, SPEC-014–016, SPEC-021)."""
 
 from postmaster.publishers.base import (
     BotTelegramClient,
@@ -19,6 +19,11 @@ from postmaster.publishers.resolver import (
     PublisherResolverErrorCode,
 )
 from postmaster.publishers.telegram import TelegramErrorCode, TelegramPublisher
+from postmaster.publishers.telegram_errors import (
+    TelegramError,
+    TelegramErrorMapper,
+    TelegramOperation,
+)
 
 __all__ = [
     "BotTelegramClient",
@@ -33,6 +38,9 @@ __all__ = [
     "ReminderErrorCode",
     "ReminderPublisher",
     "TelegramClient",
+    "TelegramError",
     "TelegramErrorCode",
+    "TelegramErrorMapper",
+    "TelegramOperation",
     "TelegramPublisher",
 ]

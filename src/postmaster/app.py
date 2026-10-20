@@ -31,6 +31,7 @@ from postmaster.publishers.base import BotTelegramClient
 from postmaster.publishers.reminder import ReminderPublisher
 from postmaster.publishers.resolver import PublisherResolver
 from postmaster.publishers.telegram import TelegramPublisher
+from postmaster.publishers.telegram_errors import TelegramErrorMapper
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.dialog_service import DialogService
@@ -95,13 +96,17 @@ class Application:
         post_repository = PostRepository(session_factory)
         bot = create_bot(settings.bot_token.get_secret_value())
         telegram_client = BotTelegramClient(bot)
+        telegram_error_mapper = TelegramErrorMapper(
+            secrets=(settings.bot_token.get_secret_value(),),
+        )
         reminder_publisher = ReminderPublisher(
             telegram_client=telegram_client,
             user_repository=user_repository,
+            error_mapper=telegram_error_mapper,
         )
         telegram_publisher = TelegramPublisher(
             telegram_client=telegram_client,
-            secrets=(settings.bot_token.get_secret_value(),),
+            error_mapper=telegram_error_mapper,
         )
         publisher_resolver = PublisherResolver(
             reminder_publisher=reminder_publisher,

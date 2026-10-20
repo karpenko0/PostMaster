@@ -7,31 +7,26 @@
 
 import inspect
 import logging
-from enum import StrEnum
 from typing import Any, Protocol
 
 from telebot.async_telebot import AsyncTeleBot
-from telebot.asyncio_helper import ApiTelegramException
 
-from postmaster.domain.post import PublicationType, TemporaryPublicationError
+from postmaster.domain.post import PublicationType
 from postmaster.domain.user import User
 from postmaster.publishers.base import BotTelegramClient, Publisher, PublishResult
+from postmaster.publishers.telegram_errors import (
+    TelegramErrorCode,
+    TelegramErrorMapper,
+    TelegramOperation,
+)
 
 logger = logging.getLogger(__name__)
 
 REMINDER_TEXT = "⏰ Время публиковать!\n\nКопируй и вставляй в соцсеть."
 
 
-class ReminderErrorCode(StrEnum):
-    """Коды ошибок ReminderPublisher (SPEC-014 §36, §42)."""
-
-    INVALID_PUBLICATION_TYPE = "INVALID_PUBLICATION_TYPE"
-    USER_NOT_FOUND = "USER_NOT_FOUND"
-    TARGET_USER_MISSING = "TARGET_USER_MISSING"
-    FILE_ID_MISSING = "FILE_ID_MISSING"
-    MESSAGE_SEND_FAILED = "MESSAGE_SEND_FAILED"
-    PHOTO_SEND_FAILED = "PHOTO_SEND_FAILED"
-    INVALID_FILE_ID = "INVALID_FILE_ID"
+# Backwards-compatible name; all publisher codes come from one shared enum.
+ReminderErrorCode = TelegramErrorCode
 
 
 class UserLookup(Protocol):
@@ -46,43 +41,6 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-def _is_invalid_file_id_error(exc: BaseException) -> bool:
-    if getattr(exc, "error_code", None) == ReminderErrorCode.INVALID_FILE_ID.value:
-        return True
-    text = str(exc).lower()
-    return any(
-        marker in text
-        for marker in (
-            "wrong file identifier",
-            "invalid file_id",
-            "wrong remote file identifier",
-        )
-    )
-
-
-def _is_temporary_telegram_error(exc: BaseException) -> bool:
-    if isinstance(exc, TemporaryPublicationError | TimeoutError | ConnectionError):
-        return True
-    if bool(getattr(exc, "is_temporary", False) or getattr(exc, "retryable", False)):
-        return True
-    if isinstance(exc, ApiTelegramException):
-        return exc.error_code == 429 or exc.error_code >= 500
-    return False
-
-
-def _safe_error_message(
-    exc: BaseException,
-    file_id: str | None,
-    caption: str | None,
-) -> str:
-    raw = str(exc).strip() or type(exc).__name__
-    if file_id and len(file_id) >= 4:
-        raw = raw.replace(file_id, "<file_id>")
-    if caption:
-        raw = raw.replace(caption, "<caption_redacted>")
-    return raw
-
-
 class ReminderPublisher(Publisher):
     """Отправляет пользователю напоминание и фотографию по telegram_file_id (SPEC-014)."""
 
@@ -90,16 +48,22 @@ class ReminderPublisher(Publisher):
         self,
         telegram_client: Any,
         user_repository: UserLookup | Any,
+        *,
+        error_mapper: TelegramErrorMapper | None = None,
+        secrets: tuple[str, ...] = (),
     ) -> None:
         # Поддерживаем оба порядка позиционных аргументов: (client, repo) и (repo, client).
         if hasattr(telegram_client, "get_by_id") and not hasattr(telegram_client, "send_message"):
             telegram_client, user_repository = user_repository, telegram_client
+        token = getattr(telegram_client, "token", None)
         self._client = (
             BotTelegramClient(telegram_client)
             if isinstance(telegram_client, AsyncTeleBot)
             else telegram_client
         )
         self._users = user_repository
+        mapper_secrets = (*secrets, *((token,) if isinstance(token, str) else ()))
+        self._error_mapper = error_mapper or TelegramErrorMapper(secrets=mapper_secrets)
 
     async def publish(self, post: Any) -> PublishResult:
         """Выполняет отправку напоминания и фото, возвращая PublishResult (SPEC-014 §13–15)."""
@@ -142,11 +106,17 @@ class ReminderPublisher(Publisher):
         try:
             await _maybe_await(self._client.send_message(chat_id, REMINDER_TEXT))
         except Exception as exc:
+            error = self._error_mapper.map(
+                exc,
+                operation=TelegramOperation.MESSAGE,
+                file_id=file_id,
+                caption=caption,
+            )
             return self._fail(
                 post_id,
-                ReminderErrorCode.MESSAGE_SEND_FAILED,
-                _safe_error_message(exc, file_id, caption),
-                retryable=_is_temporary_telegram_error(exc),
+                error.code,
+                error.message,
+                retryable=error.retryable,
             )
 
         try:
@@ -155,21 +125,17 @@ class ReminderPublisher(Publisher):
             else:
                 await _maybe_await(self._client.send_photo(chat_id, file_id))
         except Exception as exc:
-            code = (
-                ReminderErrorCode.INVALID_FILE_ID
-                if _is_invalid_file_id_error(exc)
-                else ReminderErrorCode.PHOTO_SEND_FAILED
-            )
-            retryable = (
-                False
-                if code == ReminderErrorCode.INVALID_FILE_ID
-                else _is_temporary_telegram_error(exc)
+            error = self._error_mapper.map(
+                exc,
+                operation=TelegramOperation.PHOTO,
+                file_id=file_id,
+                caption=caption,
             )
             return self._fail(
                 post_id,
-                code,
-                _safe_error_message(exc, file_id, caption),
-                retryable=retryable,
+                error.code,
+                error.message,
+                retryable=error.retryable,
             )
 
         logger.info("Reminder publication completed post_id=%s", post_id)
@@ -178,7 +144,7 @@ class ReminderPublisher(Publisher):
     def _fail(
         self,
         post_id: Any,
-        code: ReminderErrorCode,
+        code: TelegramErrorCode,
         message: str,
         *,
         retryable: bool = False,

@@ -138,8 +138,21 @@ def test_telegram_publisher_contracts_and_spec015_error_codes(
     assert isinstance(BotTelegramClient(create_bot(fake_telegram.token)), TelegramClient)
 
     spec_text = SPEC_015_PATH.read_text(encoding="utf-8")
-    for code in TelegramErrorCode:
-        assert code.value in spec_text
+    spec015_codes = {
+        "INVALID_PUBLICATION_TYPE",
+        "INVALID_POST_STATUS",
+        "TARGET_REQUIRED",
+        "FILE_ID_MISSING",
+        "TELEGRAM_PERMISSION_DENIED",
+        "TELEGRAM_TARGET_UNAVAILABLE",
+        "INVALID_FILE_ID",
+        "TELEGRAM_API_TIMEOUT",
+        "NETWORK_ERROR",
+        "TELEGRAM_API_UNAVAILABLE",
+    }
+    assert spec015_codes <= {code.value for code in TelegramErrorCode}
+    for code in spec015_codes:
+        assert code in spec_text
 
 
 # ---------------------------------------------------------------------------
