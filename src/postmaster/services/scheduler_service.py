@@ -1,4 +1,4 @@
-"""Обёртка над APScheduler (SPEC-010, SPEC-013).
+"""Обёртка над APScheduler (SPEC-010, SPEC-013, SPEC-022).
 
 Scheduler работает в event loop приложения. Его задания вызывают прикладные сервисы,
 а не Telegram API напрямую (BR-04). При подключённом PublicationService выполнение
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class PostExecutionService(Protocol):
-    async def execute(self, post_id: int) -> object: ...
+    async def execute(self, post_id: int, attempt: int = 0) -> object: ...
 
 
 class SchedulerService:
@@ -51,9 +51,28 @@ class SchedulerService:
             replace_existing=True,
         )
 
-    async def _on_post_due(self, post_id: int) -> None:
+    def schedule_retry(self, *, post_id: int, run_at: datetime, attempt: int) -> None:
+        """Добавляет одноразовый retry job, который снова вызывает PublicationService."""
+        if run_at.tzinfo is None or run_at.utcoffset() != timedelta(0):
+            raise ValueError("run_at должен быть aware UTC")
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt not in {1, 2, 3}:
+            raise ValueError("attempt должен быть 1, 2 или 3")
+        if self._publication_service is None:
+            raise RuntimeError("Retry Scheduler требует PublicationService")
+        if not self.running:
+            raise RuntimeError("Scheduler не запущен")
+        self._scheduler.add_job(
+            self._on_post_due,
+            trigger="date",
+            run_date=run_at.astimezone(UTC),
+            args=(post_id, attempt),
+            id=f"retry:{post_id}",
+            replace_existing=True,
+        )
+
+    async def _on_post_due(self, post_id: int, attempt: int = 0) -> None:
         if self._publication_service is not None:
-            await self._publication_service.execute(post_id)
+            await self._publication_service.execute(post_id, attempt=attempt)
             return
         assert self._posts is not None
         post = await self._posts.get_by_id(post_id)
@@ -65,13 +84,26 @@ class SchedulerService:
         )
 
     def remove_post(self, post_id: int) -> bool:
-        """Удаляет date-job поста; отсутствие job — штатный исход (SPEC-018 §17–19)."""
-        try:
-            self._scheduler.remove_job(f"post:{post_id}")
-        except JobLookupError:
+        """Удаляет обычный и retry date-job поста (SPEC-018, SPEC-022)."""
+        removed = False
+        for job_id in (f"post:{post_id}", f"retry:{post_id}"):
+            try:
+                self._scheduler.remove_job(job_id)
+            except JobLookupError:
+                continue
+            removed = True
+        if removed:
+            logger.info("Scheduler jobs removed post_id=%s", post_id)
+        else:
             logger.info("Scheduler job not found post_id=%s", post_id)
+        return removed
+
+    def remove_retry(self, post_id: int) -> bool:
+        """Удаляет только retry job при откате регистрации или неудачном DB переходе."""
+        try:
+            self._scheduler.remove_job(f"retry:{post_id}")
+        except JobLookupError:
             return False
-        logger.info("Scheduler job removed post_id=%s", post_id)
         return True
 
     @property

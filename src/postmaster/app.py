@@ -40,6 +40,7 @@ from postmaster.services.post_cancellation_service import PostCancellationServic
 from postmaster.services.post_query_service import PostQueryService
 from postmaster.services.post_service import PostService
 from postmaster.services.publication_service import PublicationService
+from postmaster.services.retry_service import RetryService
 from postmaster.services.scheduler_service import SchedulerService
 from postmaster.services.user_service import UserService
 from postmaster.utils.logging_config import configure_logging
@@ -117,6 +118,7 @@ class Application:
             publisher_resolver=publisher_resolver,
         )
         scheduler = SchedulerService(post_repository, publication_service)
+        publication_service.set_retry_service(RetryService(post_repository, scheduler))
         dialog_service = DialogService(
             TelebotDialogStore(bot),
             user_service=user_service,

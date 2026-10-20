@@ -1,4 +1,4 @@
-"""PublicationService: идемпотентное выполнение публикации с atomic claim (SPEC-013…016).
+"""PublicationService: atomic claim, публикация и retry (SPEC-013…016, SPEC-022).
 
 Любой источник запуска (Scheduler, Recovery, Missed Job) вызывает PublicationService.execute,
 не переводя Post в PROCESSING самостоятельно (§19). Право на вызов Publisher получает только
@@ -9,7 +9,7 @@
 import logging
 from collections.abc import Callable, Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 from postmaster.domain.post import (
     Post,
@@ -19,10 +19,21 @@ from postmaster.domain.post import (
 )
 from postmaster.publishers.base import Publisher, PublishResult
 from postmaster.publishers.resolver import PublisherNotFoundError, PublisherResolver
+from postmaster.publishers.telegram_errors import TelegramErrorCode
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.utils.clock import utc_now
 
 logger = logging.getLogger(__name__)
+
+
+class RetryHandler(Protocol):
+    async def handle_retryable_error(
+        self,
+        post_id: int,
+        error_code: str,
+        error_message: str,
+        attempt: int,
+    ) -> bool: ...
 
 
 class PublishResultError(Exception):
@@ -52,6 +63,7 @@ class PublicationService:
         publishers: Mapping[PublicationType | str, Publisher] | None = None,
         is_temporary_error: Callable[[BaseException], bool] | None = None,
         now_fn: Callable[[], datetime] = utc_now,
+        retry_service: RetryHandler | None = None,
     ) -> None:
         self._repository = post_repository
         self._default_publisher: Publisher | None = None
@@ -77,14 +89,21 @@ class PublicationService:
 
         self._is_temporary_error = is_temporary_error
         self._now_fn = now_fn
+        self._retry_service = retry_service
+
+    def set_retry_service(self, retry_service: RetryHandler) -> None:
+        """Подключает retry после сборки SchedulerService в графе зависимостей."""
+        self._retry_service = retry_service
 
     @property
     def publisher_resolver(self) -> PublisherResolver | None:
         """Возвращает подключённый PublisherResolver (SPEC-016 §13, §16)."""
         return self._resolver
 
-    async def execute(self, post_id: int) -> bool:
-        """Атомарно захватывает PENDING-пост, выбирает Publisher, публикует и меняет статус."""
+    async def execute(self, post_id: int, attempt: int = 0) -> bool:
+        """Атомарно захватывает PENDING-пост, публикует и учитывает retry attempt."""
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
+            raise ValueError("attempt должен быть неотрицательным целым числом")
         if self._repository is None:
             raise RuntimeError("PublicationService требует PostRepository")
 
@@ -105,11 +124,11 @@ class PublicationService:
             publisher = self._resolve_publisher(post)
             result = await publisher.publish(post)
         except Exception as exc:
-            await self._handle_publish_error(post_id, exc)
+            await self._handle_publish_error(post_id, exc, attempt=attempt)
             return False
 
         if isinstance(result, PublishResult) and not result.success:
-            await self._handle_publish_error(post_id, PublishResultError(result))
+            await self._handle_publish_error(post_id, PublishResultError(result), attempt=attempt)
             return False
 
         published_at = self._now_fn()
@@ -131,6 +150,8 @@ class PublicationService:
                 PublicationErrorCode.FINAL_STATUS_UPDATE_FAILED.value,
             )
             return False
+        if attempt > 0:
+            logger.info("Retry succeeded post_id=%s attempt=%s", post_id, attempt)
         return True
 
     execute_post = execute
@@ -156,11 +177,28 @@ class PublicationService:
             return True
         return bool(getattr(exc, "is_temporary", False) or getattr(exc, "retryable", False))
 
-    async def _handle_publish_error(self, post_id: int, exc: BaseException) -> None:
+    async def _handle_publish_error(
+        self,
+        post_id: int,
+        exc: BaseException,
+        *,
+        attempt: int = 0,
+    ) -> None:
         assert self._repository is not None
         message = str(exc).strip() or type(exc).__name__
         now = self._now_fn()
         if self._is_temporary(exc):
+            if self._retry_service is not None:
+                error_code = getattr(exc, "error_code", None)
+                if not isinstance(error_code, str) or not error_code:
+                    error_code = TelegramErrorCode.TELEGRAM_API_UNAVAILABLE.value
+                await self._retry_service.handle_retryable_error(
+                    post_id,
+                    error_code,
+                    message,
+                    attempt + 1,
+                )
+                return
             try:
                 updated = await self._repository.release_post_for_retry(
                     post_id, error_message=message, now=now
