@@ -9,6 +9,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from postmaster.repositories.post_repository import PostRepository
@@ -56,13 +57,22 @@ class SchedulerService:
             return
         assert self._posts is not None
         post = await self._posts.get_by_id(post_id)
-        # Пока конкретные Publisher не подключены (SPEC-014/015), оставляем PENDING
-        # для будущего recovery, не меняя статус в самом Scheduler (SPEC-013 §19).
+        # Scheduler не меняет статус самостоятельно; публикация/claim принадлежат service.
         logger.warning(
             "Post due but execution is not implemented post_id=%s exists=%s",
             post_id,
             post is not None,
         )
+
+    def remove_post(self, post_id: int) -> bool:
+        """Удаляет date-job поста; отсутствие job — штатный исход (SPEC-018 §17–19)."""
+        try:
+            self._scheduler.remove_job(f"post:{post_id}")
+        except JobLookupError:
+            logger.info("Scheduler job not found post_id=%s", post_id)
+            return False
+        logger.info("Scheduler job removed post_id=%s", post_id)
+        return True
 
     @property
     def running(self) -> bool:

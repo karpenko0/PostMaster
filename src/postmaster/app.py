@@ -35,6 +35,7 @@ from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.dialog_service import DialogService
 from postmaster.services.photo_service import PhotoService
+from postmaster.services.post_cancellation_service import PostCancellationService
 from postmaster.services.post_query_service import PostQueryService
 from postmaster.services.post_service import PostService
 from postmaster.services.publication_service import PublicationService
@@ -124,6 +125,11 @@ class Application:
             dialog_service=dialog_service,
             photo_service=PhotoService(),
             post_query_service=PostQueryService(user_service, post_repository),
+            cancellation_service=PostCancellationService(
+                user_service,
+                post_repository,
+                scheduler,
+            ),
         )
         return cls(
             bot=bot,

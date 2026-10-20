@@ -320,8 +320,10 @@ class PostRepository:
         )
         return False
 
-    async def cancel_post(self, post_id: int, user_id: int, *, now: datetime | None = None) -> bool:
-        """Отмена только собственного PENDING по одному условному UPDATE (RT-008-05)."""
+    async def cancel_pending_post(
+        self, post_id: int, user_id: int, *, now: datetime | None = None
+    ) -> bool:
+        """Атомарно отменяет только собственный PENDING (SPEC-018, RT-008-05)."""
         stamp = _to_storage(now if now is not None else utc_now(), "now")
         async with self._session_factory() as session, session.begin():
             result = await session.execute(
@@ -337,3 +339,6 @@ class PostRepository:
             logger.info("Post status changed id=%s PENDING->CANCELLED", post_id)
             return True
         return False
+
+    # Совместимость с ранним контрактом SPEC-008; новый код использует явно scoped имя.
+    cancel_post = cancel_pending_post
