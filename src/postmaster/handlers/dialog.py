@@ -30,6 +30,7 @@ DATE_PROMPT = (
 PHOTO_ACCEPTED_TEXT = (
     "📸 Фото получил!\n\n"
     "Теперь укажи дату и время публикации.\n\n"
+    "Если нужна подпись, добавь текст к фотографии в Telegram.\n\n"
     "Формат:\n\n"
     "ДД.ММ.ГГГГ ЧЧ:ММ\n\n"
     "Например:\n"
@@ -130,7 +131,11 @@ def register_dialog_handlers(
         # message.photo — массив PhotoSize; максимальный размер и метаданные выбирает сервис
         # (BR-004-04, §22). Фото скачивать не нужно (BR-004-03).
         try:
-            photo = photo_service.handle_photo(sender.id, list(message.photo or []))
+            photo = photo_service.handle_photo(
+                sender.id,
+                list(message.photo or []),
+                caption=message.caption,
+            )
         except PhotoProcessingError:
             # ERR-004-01…ERR-004-03: FSM не меняется, пользователь получает запрос фотографии.
             await bot.send_message(message.chat.id, PHOTO_REQUEST)

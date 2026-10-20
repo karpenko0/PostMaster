@@ -21,6 +21,7 @@ from postmaster.domain.post import (
     PublicationErrorCode,
     PublicationType,
     UserNotFoundError,
+    normalize_caption,
 )
 from postmaster.utils.clock import utc_now
 
@@ -104,7 +105,7 @@ class PostRepository:
                 created_at=timestamp,
                 updated_at=timestamp,
                 published_at=None,
-                caption=caption,
+                caption=normalize_caption(caption),
             )
             session.add(model)
             await session.flush()

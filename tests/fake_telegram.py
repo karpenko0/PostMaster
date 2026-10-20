@@ -97,6 +97,7 @@ class FakeTelegram:
         username: str | None = None,
         first_name: str | None = "Tester",
         chat_type: str = "private",
+        caption: str | None = None,
     ) -> None:
         """Ставит в очередь фотографию в двух размерах, как присылает Telegram.
 
@@ -118,8 +119,11 @@ class FakeTelegram:
                 "file_size": 150000,
             },
         ]
+        body: dict[str, Any] = {"photo": sizes}
+        if caption is not None:
+            body["caption"] = caption
         self.add_message(
-            {"photo": sizes},
+            body,
             chat_id,
             user_id=user_id,
             username=username,

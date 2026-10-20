@@ -9,6 +9,7 @@ from pathlib import Path
 
 from postmaster.handlers.dialog import PHOTO_ACCEPTED_TEXT, PHOTO_REQUEST
 from postmaster.services.dialog_service import (
+    PHOTO_CAPTION_KEY,
     PHOTO_FILE_ID_KEY,
     PHOTO_FILE_SIZE_KEY,
     PHOTO_HEIGHT_KEY,
@@ -47,4 +48,5 @@ def test_fsm_draft_keys_match_spec() -> None:
         PHOTO_FILE_SIZE_KEY,
         PHOTO_WIDTH_KEY,
         PHOTO_HEIGHT_KEY,
+        PHOTO_CAPTION_KEY,
     }

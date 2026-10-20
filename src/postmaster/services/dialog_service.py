@@ -44,6 +44,7 @@ PHOTO_UNIQUE_ID_KEY = "telegram_file_unique_id"
 PHOTO_FILE_SIZE_KEY = "file_size"
 PHOTO_WIDTH_KEY = "width"
 PHOTO_HEIGHT_KEY = "height"
+PHOTO_CAPTION_KEY = "caption"
 
 
 def _photo_draft(photo: PhotoData) -> dict[str, str]:
@@ -56,6 +57,8 @@ def _photo_draft(photo: PhotoData) -> dict[str, str]:
     }
     if photo.file_size is not None:
         draft[PHOTO_FILE_SIZE_KEY] = str(photo.file_size)
+    if photo.caption is not None and photo.caption.strip():
+        draft[PHOTO_CAPTION_KEY] = photo.caption
     return draft
 
 
@@ -187,6 +190,7 @@ class DialogService:
                     timezone=parsed.timezone,
                     publication_type=self._publication_type,
                     target_id=self._target_id,
+                    caption=draft.get(PHOTO_CAPTION_KEY),
                 )
             except PostCreationError as exc:
                 # Нет записи: оставляем дату и черновик для повторной попытки.

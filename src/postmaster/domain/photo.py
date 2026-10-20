@@ -27,16 +27,19 @@ class PhotoSizeLike(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class PhotoData:
-    """Метаданные выбранной фотографии (§23). Бинарные данные изображения не входят."""
+    """Метаданные выбранной фотографии и опциональная Telegram-подпись."""
 
     file_id: str
     file_unique_id: str
     file_size: int | None
     width: int
     height: int
+    caption: str | None = None
 
 
-def select_largest_photo(photo_sizes: Sequence[PhotoSizeLike]) -> PhotoData:
+def select_largest_photo(
+    photo_sizes: Sequence[PhotoSizeLike], *, caption: str | None = None
+) -> PhotoData:
     """Выбирает максимальный размер (BR-004-04) и собирает метаданные (§11).
 
     Пустой список — ошибка ERR-004-02, отсутствие file_id у выбранного объекта — ERR-004-03.
@@ -52,4 +55,5 @@ def select_largest_photo(photo_sizes: Sequence[PhotoSizeLike]) -> PhotoData:
         file_size=largest.file_size,
         width=largest.width,
         height=largest.height,
+        caption=caption if caption is not None and caption.strip() else None,
     )

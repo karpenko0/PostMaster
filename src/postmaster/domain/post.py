@@ -6,6 +6,15 @@ from enum import StrEnum
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
+def normalize_caption(caption: str | None) -> str | None:
+    """Пустая/состоящая из пробелов подпись эквивалентна отсутствующей; текст не переписывается."""
+    if caption is None:
+        return None
+    if not isinstance(caption, str):
+        raise ValueError("caption должен быть текстом или None")
+    return caption if caption.strip() else None
+
+
 class PostStatus(StrEnum):
     PENDING = "PENDING"
     PROCESSING = "PROCESSING"
@@ -75,6 +84,7 @@ class Post:
     caption: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "caption", normalize_caption(self.caption))
         if not isinstance(self.status, PostStatus) or not isinstance(
             self.publication_type, PublicationType
         ):
