@@ -27,6 +27,7 @@ from postmaster.bot.sender import BotTelegramReminderSender, BotTelegramSender
 from postmaster.database.engine import create_database_engine, create_session_factory
 from postmaster.database.schema import create_schema
 from postmaster.domain.post import Post, PostStatus, PublicationType
+from postmaster.publishers import DefaultPublisherResolver
 from postmaster.publishers.reminder_publisher import ReminderPublisher
 from postmaster.publishers.telegram_publisher import (
     TargetMissingError,
@@ -35,7 +36,6 @@ from postmaster.publishers.telegram_publisher import (
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.publication_service import (
-    DefaultPublisherResolver,
     PublicationError,
     PublicationService,
     RetryPolicy,

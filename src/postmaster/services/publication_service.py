@@ -1,9 +1,9 @@
-"""PublicationService: выполнение публикации через Publisher (SPEC-010, SPEC-013).
+"""PublicationService: выполнение публикации через Publisher (SPEC-010, SPEC-013, SPEC-016).
 
 Сервис координирует процесс публикации:
 1. Атомарно забирает пост в работу: PENDING -> PROCESSING (claim_for_processing).
    Только rowcount=1 даёт право вызвать Publisher.
-2. Выбирает нужный Publisher по типу публикации.
+2. Резолвит Publisher по типу публикации через PublisherResolver (SPEC-016).
 3. Вызывает Publisher.publish(post).
 4. При успехе переводит PROCESSING -> PUBLISHED с временной меткой.
 5. При ошибке переводит PROCESSING -> FAILED с сообщением об ошибке.
@@ -15,17 +15,17 @@
 
 import asyncio
 import logging
-from typing import Protocol
 
 from postmaster.domain.post import (
     Post,
     PostNotFoundError,
     PostStatus,
-    PublicationType,
 )
-from postmaster.publishers.base import Publisher
-from postmaster.publishers.reminder_publisher import ReminderPublisher
-from postmaster.publishers.telegram_publisher import TelegramChannelPublisher
+from postmaster.publishers.resolver import (
+    PublisherNotConfiguredError,
+    PublisherResolver,
+    UnknownPublicationTypeError,
+)
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.utils.clock import utc_now
 
@@ -46,35 +46,6 @@ class PostNotPendingError(PublicationError):
 
 class PostClaimLostError(PublicationError):
     """Другой исполнитель уже забрал пост (claim вернул None)."""
-
-
-class PublisherResolver(Protocol):
-    """Порт выбора Publisher по типу публикации."""
-
-    def resolve(self, publication_type: PublicationType) -> Publisher: ...
-
-
-class DefaultPublisherResolver:
-    """Стандартный резолвер: выбирает Publisher по типу публикации."""
-
-    def __init__(
-        self,
-        telegram_publisher: TelegramChannelPublisher | None = None,
-        reminder_publisher: ReminderPublisher | None = None,
-    ) -> None:
-        self._telegram = telegram_publisher
-        self._reminder = reminder_publisher
-
-    def resolve(self, publication_type: PublicationType) -> Publisher:
-        if publication_type == PublicationType.TELEGRAM:
-            if self._telegram is None:
-                raise PublicationError(0, "Telegram publisher не настроен")
-            return self._telegram
-        if publication_type == PublicationType.REMINDER:
-            if self._reminder is None:
-                raise PublicationError(0, "Reminder publisher не настроен")
-            return self._reminder
-        raise PublicationError(0, f"неизвестный тип публикации: {publication_type}")
 
 
 class RetryPolicy:
@@ -128,9 +99,11 @@ class PublicationService:
         # С этого момента исполнитель имеет право на вызов Publisher.
         try:
             publisher = self._publishers.resolve(claimed.publication_type)
-        except PublicationError as exc:
+        except (PublisherNotConfiguredError, UnknownPublicationTypeError) as exc:
+            # SPEC-016: неизвестный тип или ненастроенный publisher — пост не публикуется,
+            # переходим в FAILED с информативным сообщением.
             await self._mark_failed(post_id, str(exc))
-            raise
+            raise PublicationError(post_id, str(exc)) from exc
 
         last_error: Exception | None = None
         for attempt in range(1, self._retry_policy.max_attempts + 1):

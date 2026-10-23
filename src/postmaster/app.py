@@ -28,18 +28,18 @@ from postmaster.database.engine import (
 from postmaster.database.schema import create_schema
 from postmaster.domain.post import PublicationType
 from postmaster.handlers.registry import register_handlers
-from postmaster.publishers.reminder_publisher import ReminderPublisher
-from postmaster.publishers.telegram_publisher import TelegramChannelPublisher
+from postmaster.publishers import (
+    DefaultPublisherResolver,
+    ReminderPublisher,
+    TelegramChannelPublisher,
+)
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.dialog_service import DialogService
 from postmaster.services.missed_post_handler import MissedPostHandler
 from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
-from postmaster.services.publication_service import (
-    DefaultPublisherResolver,
-    PublicationService,
-)
+from postmaster.services.publication_service import PublicationService
 from postmaster.services.recipient_resolver import (
     UserServiceReminderRecipientResolver,
 )
