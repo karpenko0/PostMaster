@@ -66,6 +66,10 @@ class UserService:
         """Находит профиль по стабильному Telegram ID, не по изменяемому username."""
         return await self._repository.get_by_telegram_id(telegram_user_id)
 
+    async def get_by_id(self, user_id: int) -> User | None:
+        """Находит профиль по внутреннему users.id (SPEC-010)."""
+        return await self._repository.find_by_id(user_id)
+
     def effective_timezone(self, user: User) -> str:
         """Часовой пояс пользователя или DEFAULT_TIMEZONE, если пояс не задан (BR-04)."""
         return user.effective_timezone(self._default_timezone)

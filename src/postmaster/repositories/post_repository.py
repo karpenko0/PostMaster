@@ -137,6 +137,32 @@ class PostRepository:
         async with self._session_factory() as session:
             return [_to_domain(model) for model in (await session.scalars(statement)).all()]
 
+    async def claim_for_processing(
+        self, post_id: int, *, now: datetime | None = None
+    ) -> Post | None:
+        """Атомарно переводит PENDING → PROCESSING (SPEC-013 §1, §4).
+
+        Право на публикацию даёт только rowcount=1: если запись уже забрана другим
+        исполнителем или её статус изменился (например, отмена), метод возвращает None.
+        Одним условным UPDATE обеспечивается взаимная исключительность claim и cancel.
+        """
+        stamp = _to_storage(now if now is not None else utc_now(), "now")
+        async with self._session_factory() as session, session.begin():
+            result = await session.execute(
+                update(PostModel)
+                .where(PostModel.id == post_id, PostModel.status == PostStatus.PENDING.value)
+                .values(status=PostStatus.PROCESSING.value, updated_at=stamp)
+            )
+            if result.rowcount != 1:
+                logger.info("Post claim skipped id=%s: status changed concurrently", post_id)
+                return None
+            model = await session.get(PostModel, post_id)
+            if model is None:
+                return None
+            post = _to_domain(model)
+        logger.info("Post claimed id=%s status=PROCESSING", post_id)
+        return post
+
     async def update_status(
         self,
         post_id: int,

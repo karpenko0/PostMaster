@@ -28,6 +28,12 @@ class UserRepository:
             )
         return None if model is None else _to_domain(model)
 
+    async def find_by_id(self, user_id: int) -> User | None:
+        """Возвращает пользователя по внутреннему id или None."""
+        async with self._session_factory() as session:
+            model = await session.get(UserModel, user_id)
+        return None if model is None else _to_domain(model)
+
     async def get_by_telegram_id(self, telegram_user_id: int) -> User | None:
         """Контракт SPEC-007 §31; find_by_telegram_id сохранён для SPEC-002."""
         return await self.find_by_telegram_id(telegram_user_id)

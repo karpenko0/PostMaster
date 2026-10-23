@@ -51,6 +51,8 @@ class FakeTelegram:
     methods: list[str] = field(default_factory=list)
     # Тексты, которые бот отправил через sendMessage: chat_id и text в виде строк.
     sent_messages: list[dict[str, str]] = field(default_factory=list)
+    # Фото, которые бот отправил через sendPhoto: chat_id, photo (file_id) и caption.
+    sent_photos: list[dict[str, str]] = field(default_factory=list)
     get_updates_called: asyncio.Event = field(default_factory=asyncio.Event)
     update_delivered: asyncio.Event = field(default_factory=asyncio.Event)
     _pending: list[dict[str, Any]] = field(default_factory=list)
@@ -206,6 +208,8 @@ class FakeTelegram:
             return await self._get_updates(request)
         if method == "sendMessage":
             return await self._send_message(request)
+        if method == "sendPhoto":
+            return await self._send_photo(request)
         return _ok(True)
 
     async def _send_message(self, request: web.Request) -> web.Response:
@@ -220,6 +224,28 @@ class FakeTelegram:
                 "date": 1_700_000_000,
                 "chat": {"id": int(chat_id), "type": "private"},
                 "text": text,
+            }
+        )
+
+    async def _send_photo(self, request: web.Request) -> web.Response:
+        params = await _request_params(request)
+        chat_id = params.get("chat_id", "")
+        photo = params.get("photo", "")
+        caption = params.get("caption", "")
+        self.sent_photos.append({"chat_id": chat_id, "photo": photo, "caption": caption})
+        return _ok(
+            {
+                "message_id": len(self.sent_photos),
+                "date": 1_700_000_000,
+                "chat": {"id": int(chat_id), "type": "private"},
+                "photo": [
+                    {
+                        "file_id": photo,
+                        "file_unique_id": "fake",
+                        "width": 1280,
+                        "height": 960,
+                    }
+                ],
             }
         )
 

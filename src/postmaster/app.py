@@ -17,6 +17,7 @@ from telebot.asyncio_helper import ApiTelegramException
 
 from postmaster.bot.dialog_store import TelebotDialogStore
 from postmaster.bot.factory import close_bot_session, create_bot
+from postmaster.bot.sender import BotTelegramReminderSender, BotTelegramSender
 from postmaster.bot.transport import PollingTransport, Transport
 from postmaster.config import ConfigError, Settings, load_settings
 from postmaster.database.engine import (
@@ -27,11 +28,22 @@ from postmaster.database.engine import (
 from postmaster.database.schema import create_schema
 from postmaster.domain.post import PublicationType
 from postmaster.handlers.registry import register_handlers
+from postmaster.publishers.reminder_publisher import ReminderPublisher
+from postmaster.publishers.telegram_publisher import TelegramChannelPublisher
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.dialog_service import DialogService
+from postmaster.services.missed_post_handler import MissedPostHandler
 from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
+from postmaster.services.publication_service import (
+    DefaultPublisherResolver,
+    PublicationService,
+)
+from postmaster.services.recipient_resolver import (
+    UserServiceReminderRecipientResolver,
+)
+from postmaster.services.recovery_service import RecoveryService
 from postmaster.services.scheduler_service import SchedulerService
 from postmaster.services.user_service import UserService
 from postmaster.utils.logging_config import configure_logging
@@ -69,6 +81,8 @@ class Application:
         self._scheduler = scheduler
         self._transport = transport
         self._closed = False
+        self._recovery_service: RecoveryService | None = None
+        self._missed_post_handler: MissedPostHandler | None = None
 
     @property
     def bot(self) -> AsyncTeleBot:
@@ -85,8 +99,34 @@ class Application:
             default_timezone=settings.default_timezone,
         )
         post_repository = PostRepository(session_factory)
-        scheduler = SchedulerService(post_repository)
         bot = create_bot(settings.bot_token.get_secret_value())
+
+        photo_sender = BotTelegramSender(bot)
+        reminder_sender = BotTelegramReminderSender(bot)
+
+        recipient_resolver = UserServiceReminderRecipientResolver(user_service)
+        telegram_publisher = TelegramChannelPublisher(photo_sender)
+        reminder_publisher = ReminderPublisher(reminder_sender, recipient_resolver)
+
+        publisher_resolver = DefaultPublisherResolver(
+            telegram_publisher=telegram_publisher,
+            reminder_publisher=reminder_publisher,
+        )
+        publication_service = PublicationService(post_repository, publisher_resolver)
+
+        scheduler = SchedulerService(
+            post_repository=post_repository,
+            publication_executor=publication_service,
+        )
+        missed_post_handler = MissedPostHandler(
+            repository=post_repository,
+            publication_executor=publication_service,
+        )
+        recovery_service = RecoveryService(
+            repository=post_repository,
+            scheduler=scheduler,
+            missed_post_handler=missed_post_handler,
+        )
         dialog_service = DialogService(
             TelebotDialogStore(bot),
             user_service=user_service,
@@ -100,15 +140,18 @@ class Application:
             dialog_service=dialog_service,
             photo_service=PhotoService(),
         )
-        return cls(
+        instance = cls(
             bot=bot,
             engine=engine,
             scheduler=scheduler,
             transport=PollingTransport(bot),
         )
+        instance._recovery_service = recovery_service
+        instance._missed_post_handler = missed_post_handler
+        return instance
 
     async def startup(self) -> None:
-        """Проверяет доступность БД, создаёт недостающие таблицы и запускает Scheduler."""
+        """Проверяет БД, создаёт таблицы, восстанавливает задания и запускает Scheduler."""
         try:
             await check_database(self._engine)
             await create_schema(self._engine)
@@ -117,6 +160,12 @@ class Application:
                 "база данных недоступна или не готова, проверьте DATABASE_URL"
             ) from None
         self._scheduler.start()
+        # Восстановление заданий выполняется после запуска Scheduler,
+        # чтобы schedule_post мог регистрировать задания.
+        if self._recovery_service is not None:
+            report = await self._recovery_service.recover()
+            if report.errors:
+                logger.warning("Recovery completed with %s errors", len(report.errors))
 
     async def run(self) -> None:
         """Запускает приложение и работает до вызова stop(). Ресурсы освобождаются всегда."""
@@ -202,7 +251,7 @@ async def _stop_when_requested(stop_requested: asyncio.Event, app: Application) 
 
 
 def main() -> None:
-    """Точка входа консольной команды ``postmaster``."""
+    """Точка входа консной команды ``postmaster``."""
     try:
         settings = load_settings()
     except ConfigError as exc:

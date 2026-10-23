@@ -101,11 +101,14 @@ mkdir -p data && sudo chown -R 1000:1000 data
 задаются **конфигурацией бота**, а не в чате: по умолчанию `REMINDER`, для канала —
 `POST_MODE=TELEGRAM` и `TELEGRAM_TARGET_ID`.
 
-**Важно:** SPEC-009 регистрирует задания, но при их наступлении пока только перечитывает запись
-и логирует отсутствие обработчика. Реальной отправки фото или напоминания ещё нет
-(SPEC-010/014/015); восстановления заданий после рестарта тоже нет (SPEC-011). Текст
-подтверждения описывает запланированное действие, а не факт доставки. Команды
-`/my_posts` и `/cancel` появятся в SPEC-017/018.
+**Важно:** SPEC-009 регистрирует задания, а SPEC-010 выполняет их: при наступлении
+времени Scheduler вызывает `PublicationService`, который переводит пост `PENDING → PROCESSING → PUBLISHED`
+и публикует фото в Telegram-канал (`POST_MODE=TELEGRAM`) или отправляет напоминание пользователю
+(`POST_MODE=REMINDER`). При ошибке публикации пост переходит в `FAILED` с сообщением; сервис
+делает несколько попыток с настраиваемой задержкой. SPEC-011 восстанавливает задания после
+перезапуска: будущие PENDING-посты перепланируются, а overdue передаются в MissedPostHandler
+(SPEC-012), который перечитывает их из БД и публикует немедленно. Команды `/my_posts` и `/cancel`
+появятся в SPEC-017/018.
 
 Старые SQLite-БД, созданные до SPEC-007, всё ещё могут иметь `users.first_name NOT NULL`:
 `create_all` не изменяет существующие таблицы. Для обновления этой колонки потребуется
@@ -127,7 +130,7 @@ mkdir -p data && sudo chown -R 1000:1000 data
 |----------------|-------------------------------------------------------------------|
 | `bot`          | Клиент Telegram, транспорт обновлений (Long Polling), хранилище состояния диалога |
 | `handlers`     | Telegram-обработчики. Только разбор сообщения и вызов сервиса     |
-| `services`     | Бизнес-логика: `DialogService`, `UserService`, `PhotoService`, `PostService`, `PublicationService`, `SchedulerService` |
+| `services`     | Бизнес-логика: `DialogService`, `UserService`, `PhotoService`, `PostService`, `PublicationService`, `SchedulerService`, `RecoveryService`, `MissedPostHandler` |
 | `publishers`   | Интерфейс `Publisher` и реализации публикации                     |
 | `repositories` | Доступ к данным. Единственное место с запросами к БД              |
 | `domain`       | Доменные модели без зависимостей от Telegram и БД                 |
