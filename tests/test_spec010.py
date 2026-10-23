@@ -28,7 +28,10 @@ from postmaster.database.engine import create_database_engine, create_session_fa
 from postmaster.database.schema import create_schema
 from postmaster.domain.post import Post, PostStatus, PublicationType
 from postmaster.publishers.reminder_publisher import ReminderPublisher
-from postmaster.publishers.telegram_publisher import TelegramChannelPublisher
+from postmaster.publishers.telegram_publisher import (
+    TargetMissingError,
+    TelegramChannelPublisher,
+)
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.publication_service import (
@@ -133,6 +136,7 @@ async def test_telegram_publisher_publishes_photo() -> None:
         updated_at=RUN_AT,
         target_id="-1001234567890",
         caption="Тест",
+        status=PostStatus.PROCESSING,
     )
     await publisher.publish(post)
     assert sender.calls == [
@@ -158,9 +162,10 @@ async def test_telegram_publisher_requires_target() -> None:
         created_at=RUN_AT,
         updated_at=RUN_AT,
         target_id="-1001234567890",
+        status=PostStatus.PROCESSING,
     )
     object.__setattr__(post, "target_id", "")
-    with pytest.raises(ValueError, match="target_id"):
+    with pytest.raises(TargetMissingError, match="target_id"):
         await publisher.publish(post)
     assert sender.calls == []
 
@@ -488,6 +493,7 @@ async def test_telegram_channel_publisher_via_fake_telegram(tmp_path: Path, fake
         updated_at=RUN_AT,
         target_id="-1001234567890",
         caption="Integration test",
+        status=PostStatus.PROCESSING,
     )
 
     await publisher.publish(post)
