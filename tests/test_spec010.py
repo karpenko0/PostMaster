@@ -60,16 +60,25 @@ class RecordingTelegramSender:
 
 
 class RecordingReminderSender:
-    """Заглушка TelegramReminderSender, записывает вызовы send_message."""
+    """Заглушка TelegramReminderSender, записывает вызовы send_message и send_photo."""
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
         self.fail_with: Exception | None = None
 
-    async def send_message(self, *, chat_id: int, text: str) -> None:
+    async def send_message(self, *, chat_id: int, text: str) -> dict | None:
+        self.calls.append({"chat_id": chat_id, "text": text})
         if self.fail_with is not None:
             raise self.fail_with
-        self.calls.append({"chat_id": chat_id, "text": text})
+        return {"message_id": len(self.calls)}
+
+    async def send_photo(
+        self, *, chat_id: int, photo_file_id: str, caption: str | None = None
+    ) -> dict | None:
+        self.calls.append({"chat_id": chat_id, "photo_file_id": photo_file_id, "caption": caption})
+        if self.fail_with is not None:
+            raise self.fail_with
+        return {"message_id": len(self.calls)}
 
 
 @pytest.fixture
@@ -167,9 +176,11 @@ async def test_reminder_publisher_sends_to_user(post_repo) -> None:
 
     await publisher.publish(post)
 
-    assert len(sender.calls) == 1
+    assert len(sender.calls) == 2  # text + photo
     assert sender.calls[0]["chat_id"] == 777
-    assert "20.10.2026 15:00" in sender.calls[0]["text"]
+    assert "Время публиковать" in sender.calls[0]["text"]
+    assert sender.calls[1]["chat_id"] == 777
+    assert sender.calls[1]["photo_file_id"] == "AgAC_file_123"
 
 
 async def test_publication_service_marks_published(post_repo) -> None:
@@ -266,7 +277,7 @@ async def test_reminder_publication_via_service(post_repo) -> None:
     result = await service.publish(post_id)
 
     assert result.status == PostStatus.PUBLISHED
-    assert len(sender.calls) == 1
+    assert len(sender.calls) == 2  # text + photo
     assert sender.calls[0]["chat_id"] == 777
 
 
@@ -442,10 +453,13 @@ async def test_scheduler_real_e2e_publishes_reminder(post_repo) -> None:
         )
         scheduler.schedule_post(post_id=post_id, run_at=run_at)
 
-        await _wait_for(lambda: len(reminder_sender.calls) == 1, timeout=5)
+        await _wait_for(lambda: len(reminder_sender.calls) == 2, timeout=5)
 
-        assert len(reminder_sender.calls) == 1
+        assert len(reminder_sender.calls) == 2
         assert reminder_sender.calls[0]["chat_id"] == 777
+        assert "Время публиковать" in reminder_sender.calls[0]["text"]
+        assert reminder_sender.calls[1]["chat_id"] == 777
+        assert reminder_sender.calls[1]["photo_file_id"] == "AgAC_file_123"
         result = await repo.get_by_id(post_id)
         assert result is not None
         assert result.status == PostStatus.PUBLISHED
@@ -528,7 +542,7 @@ async def test_reminder_publisher_via_fake_telegram(tmp_path: Path, fake_telegra
     assert len(fake_telegram.sent_messages) == 1
     last_message = fake_telegram.sent_messages[-1]
     assert last_message["chat_id"] == "555"
-    assert "Напоминание" in last_message["text"]
+    assert "Время публиковать" in last_message["text"]
 
 
 async def test_scheduler_handles_missing_post(post_repo) -> None:

@@ -9,7 +9,7 @@ import logging
 from typing import Protocol
 
 from postmaster.domain.post import Post
-from postmaster.publishers.base import Publisher
+from postmaster.publishers.base import Publisher, PublishResult
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class TelegramSender(Protocol):
 
     async def send_photo(
         self, *, chat_id: str, photo_file_id: str, caption: str | None = None
-    ) -> None: ...
+    ) -> object | None: ...
 
 
 class TelegramChannelPublisher(Publisher):
@@ -28,12 +28,26 @@ class TelegramChannelPublisher(Publisher):
     def __init__(self, sender: TelegramSender) -> None:
         self._sender = sender
 
-    async def publish(self, post: Post) -> None:
+    async def publish(self, post: Post) -> PublishResult:
         if not post.target_id or not post.target_id.strip():
             raise ValueError("для TELEGRAM требуется target_id")
-        await self._sender.send_photo(
+        message = await self._sender.send_photo(
             chat_id=post.target_id,
             photo_file_id=post.telegram_file_id,
             caption=post.caption,
         )
-        logger.info("Post published via Telegram post_id=%s target=%s", post.id, post.target_id)
+        external_id = self._extract_message_id(message)
+        logger.info(
+            "Post published via Telegram post_id=%s target=%s message_id=%s",
+            post.id,
+            post.target_id,
+            external_id,
+        )
+        return PublishResult(post_id=post.id, external_id=external_id)
+
+    @staticmethod
+    def _extract_message_id(message: object | None) -> str | None:
+        if isinstance(message, dict):
+            value = message.get("message_id")
+            return None if value is None else str(value)
+        return None
