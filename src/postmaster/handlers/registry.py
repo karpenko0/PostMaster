@@ -9,6 +9,7 @@ from telebot.async_telebot import AsyncTeleBot
 
 from postmaster.handlers.cancel import register_cancel_handler
 from postmaster.handlers.dialog import register_dialog_handlers
+from postmaster.handlers.help import register_help_handler
 from postmaster.handlers.my_posts import register_my_posts_handler
 from postmaster.handlers.start import register_start_handler
 from postmaster.services.cancel_service import CancelService
@@ -27,7 +28,12 @@ def register_handlers(
     my_posts_service: MyPostsService,
     cancel_service: CancelService,
 ) -> None:
-    """Регистрирует все обработчики бота."""
+    """Регистрирует все обработчики бота.
+
+    Порядок важен: команды регистрируются раньше обработчика текста, иначе
+    текст «/start», «/help» и т. п. попадёт в DialogService.receive_text.
+    """
+    register_help_handler(bot)
     register_start_handler(bot, user_service, dialog_service)
     register_my_posts_handler(bot, my_posts_service)
     register_cancel_handler(bot, user_service, cancel_service)
