@@ -35,6 +35,7 @@ from postmaster.publishers import (
 )
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
+from postmaster.services.cancel_service import CancelService
 from postmaster.services.dialog_service import DialogService
 from postmaster.services.missed_post_handler import MissedPostHandler
 from postmaster.services.my_posts_service import MyPostsService
@@ -139,12 +140,17 @@ class Application:
             post_repository=post_repository,
             user_service=user_service,
         )
+        cancel_service = CancelService(
+            post_repository=post_repository,
+            scheduler=scheduler,
+        )
         register_handlers(
             bot,
             user_service=user_service,
             dialog_service=dialog_service,
             photo_service=PhotoService(),
             my_posts_service=my_posts_service,
+            cancel_service=cancel_service,
         )
         instance = cls(
             bot=bot,

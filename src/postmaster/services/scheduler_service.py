@@ -57,6 +57,24 @@ class SchedulerService:
             replace_existing=True,
         )
 
+    def remove_job(self, post_id: int) -> bool:
+        """Удаляет задание поста из Scheduler. Возвращает True, если задание было.
+
+        Вызывается после успешной отмены публикации (SPEC-018 §1). Ошибка удаления
+        не должна возвращать пост в PENDING: отмена уже зафиксирована в БД.
+        """
+        if not self.running:
+            logger.info("Scheduler не запущен, задание не удалено post_id=%s", post_id)
+            return False
+        try:
+            removed = self._scheduler.remove_job(f"post:{post_id}")
+        except Exception:
+            logger.exception("Не удалось удалить задание Scheduler post_id=%s", post_id)
+            return False
+        if removed:
+            logger.info("Scheduler job removed post_id=%s", post_id)
+        return removed
+
     async def _on_post_due(self, post_id: int) -> None:
         assert self._posts is not None and self._executor is not None
         post = await self._posts.get_by_id(post_id)
