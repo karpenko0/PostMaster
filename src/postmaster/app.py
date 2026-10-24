@@ -37,6 +37,7 @@ from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.dialog_service import DialogService
 from postmaster.services.missed_post_handler import MissedPostHandler
+from postmaster.services.my_posts_service import MyPostsService
 from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
 from postmaster.services.publication_service import PublicationService
@@ -134,11 +135,16 @@ class Application:
             publication_type=PublicationType(settings.post_mode),
             target_id=settings.telegram_target_id,
         )
+        my_posts_service = MyPostsService(
+            post_repository=post_repository,
+            user_service=user_service,
+        )
         register_handlers(
             bot,
             user_service=user_service,
             dialog_service=dialog_service,
             photo_service=PhotoService(),
+            my_posts_service=my_posts_service,
         )
         instance = cls(
             bot=bot,
