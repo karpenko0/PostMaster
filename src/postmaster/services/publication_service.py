@@ -26,10 +26,24 @@ from postmaster.publishers.resolver import (
     PublisherResolver,
     UnknownPublicationTypeError,
 )
+from postmaster.publishers.telegram_errors import TelegramErrorMapper
+from postmaster.publishers.telegram_publisher import (
+    TelegramAPIError,
+    TelegramTimeoutError,
+)
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.utils.clock import utc_now
 
 logger = logging.getLogger(__name__)
+
+
+# Типы, которые считаются retryable по умолчанию (без error_mapper, SPEC-022 §1):
+# сетевые и временные ошибки Telegram API, а также их типизированные обёртки.
+_DEFAULT_RETRYABLE: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    ConnectionError,
+    TelegramTimeoutError,
+)
 
 
 class PublicationError(Exception):
@@ -49,17 +63,40 @@ class PostClaimLostError(PublicationError):
 
 
 class RetryPolicy:
-    """Политика повторных попыток при ошибке публикации."""
+    """Политика повторных попыток при ошибке публикации (SPEC-022 §1, §4).
 
-    def __init__(self, max_attempts: int = 3, delay_seconds: float = 1.0) -> None:
-        if max_attempts < 1:
-            raise ValueError("max_attempts должен быть >= 1")
-        self.max_attempts = max_attempts
-        self.delay_seconds = delay_seconds
+    По умолчанию выполняется три повтора с задержками +30s, +2m, +10m. После
+    четвёртой неудачной попытки пост переходит в FAILED.
+
+    delays[i] — задержка в секундах перед повтором после неудачной попытки i+1.
+    Количество попыток суммарно равно 1 + len(delays).
+    """
+
+    #: Задержки перед повторами: +30s, +2m, +10m (SPEC-022 §4).
+    DEFAULT_DELAYS: tuple[int, ...] = (30, 120, 600)
+
+    def __init__(self, delays: tuple[int, ...] = DEFAULT_DELAYS) -> None:
+        if any(delay < 0 for delay in delays):
+            raise ValueError("задержка должна быть >= 0")
+        self.delays = delays
+
+    @property
+    def max_attempts(self) -> int:
+        """Суммарное число попыток: первая плюс повторы. Пустые delays → одна попытка."""
+        return 1 + len(self.delays)
 
     def should_retry(self, attempt: int) -> bool:
         """Нужно ли повторять попытку. attempt — номер текущей попытки (1-based)."""
-        return attempt < self.max_attempts
+        return 1 <= attempt <= len(self.delays)
+
+    def delay_after_attempt(self, attempt: int) -> int:
+        """Задержка в секундах после неудачной попытки с номером attempt (1-based).
+
+        attempt=1 → +30s, attempt=2 → +2m, attempt=3 → +10m.
+        """
+        if not self.should_retry(attempt):
+            raise ValueError(f"нет задержки для попытки {attempt}")
+        return self.delays[attempt - 1]
 
 
 class PublicationService:
@@ -70,10 +107,45 @@ class PublicationService:
         repository: PostRepository,
         publisher_resolver: PublisherResolver,
         retry_policy: RetryPolicy | None = None,
+        error_mapper: TelegramErrorMapper | None = None,
     ) -> None:
         self._repository = repository
         self._publishers = publisher_resolver
-        self._retry_policy = retry_policy or RetryPolicy(max_attempts=1)
+        # SPEC-022: если retry_policy не передан, повторы отключены — одна попытка.
+        self._retry_policy = retry_policy or RetryPolicy(delays=())
+        # Если передан маппер, он управляет retry-решением через флаг retryable
+        # (SPEC-021 §3). Без маппера сервис использует простую эвристику:
+        # TimeoutError/ConnectionError — повторяемые, всё остальное — нет.
+        self._error_mapper = error_mapper
+
+    def _is_retryable(self, exc: Exception) -> bool:
+        """True, если ошибку нужно повторить (SPEC-022 §1).
+
+        При наличии error_mapper используется его классификация (TIMEOUT/NETWORK/
+        UNAVAILABLE — retryable). Без маппера повторяемы только TimeoutError и
+        ConnectionError (см. _DEFAULT_RETRYABLE). Чтобы типизированные исключения
+        Publisher (TelegramTimeoutError и т. п.) корректно опознавались, решение
+        принимается по оригинальному исключению из ``__cause__``.
+        """
+        if self._error_mapper is not None:
+            return self._error_mapper.map_exception(exc).retryable
+        cause = exc.__cause__
+        candidates = (exc, cause) if isinstance(cause, BaseException) else (exc,)
+        return any(isinstance(c, _DEFAULT_RETRYABLE) for c in candidates)
+
+    def _build_error_message(self, exc: Exception) -> str:
+        """Готовит безопасный текст ошибки для лога и Post.error_message.
+
+        TelegramAPIError уже несёт нормализованное сообщение (SPEC-021 §7).
+        Для прочих исключений текст обрезается до 500 символов и заменяется на
+        имя типа, если строка пустая.
+        """
+        if isinstance(exc, TelegramAPIError):
+            return exc.error.message
+        raw = str(exc).strip()
+        if not raw:
+            return type(exc).__name__
+        return raw[:500]
 
     async def publish(self, post_id: int) -> Post:
         """Выполняет публикацию поста с атомарным claim, выполнением и финальным переходом.
@@ -110,28 +182,32 @@ class PublicationService:
             try:
                 await publisher.publish(claimed)
             except Exception as exc:
-                error_message = str(exc)[:500] if str(exc) else type(exc).__name__
+                error_message = self._build_error_message(exc)
+                retryable = self._is_retryable(exc)
                 last_error = exc
                 logger.warning(
-                    "Publication attempt failed post_id=%s attempt=%s error=%s",
+                    "Publication attempt failed post_id=%s attempt=%s error=%s retryable=%s",
                     post_id,
                     attempt,
                     type(exc).__name__,
+                    retryable,
                 )
-                if self._retry_policy.should_retry(attempt):
+                if retryable and self._retry_policy.should_retry(attempt):
                     # Возвращаем в PENDING для повторной попытки.
                     try:
                         await self._repository.update_status(post_id, PostStatus.PENDING)
                     except Exception:
                         logger.warning("Failed to reset post to PENDING post_id=%s", post_id)
-                    await asyncio.sleep(self._retry_policy.delay_seconds)
+                    # SPEC-022 §4: ждём delays[attempt-1] секунд перед повтором
+                    # (+30s → +2m → +10m).
+                    await asyncio.sleep(self._retry_policy.delay_after_attempt(attempt))
                     # Повторный claim перед следующей попыткой.
                     reclaimed = await self._repository.claim_for_processing(post_id)
                     if reclaimed is None:
                         raise PostClaimLostError(post_id, "потерян claim во время retry") from None
                     claimed = reclaimed
                     continue
-                # Попытки исчерпаны.
+                # Попытки исчерпаны или ошибка не повторяемая.
                 await self._mark_failed(post_id, error_message)
                 logger.error(
                     "Publication failed after %s attempts post_id=%s",

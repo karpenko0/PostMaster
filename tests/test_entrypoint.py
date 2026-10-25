@@ -32,6 +32,7 @@ def _settings_env(tmp_path: Path) -> dict[str, str]:
             "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path}/data/postmaster.db",
             "LOG_LEVEL": "INFO",
             "PYTHONUNBUFFERED": "1",
+            "PYTHONIOENCODING": "utf-8",
         }
     )
     return env

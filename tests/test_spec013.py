@@ -281,9 +281,7 @@ async def test_publication_service_retry_resets_to_pending(repo_with_user) -> No
     sender = FlakyTelegramSender(fail_count=1)
     publisher = TelegramChannelPublisher(sender)
     resolver = DefaultPublisherResolver(telegram_publisher=publisher, reminder_publisher=None)
-    service = PublicationService(
-        repo, resolver, retry_policy=RetryPolicy(max_attempts=3, delay_seconds=0)
-    )
+    service = PublicationService(repo, resolver, retry_policy=RetryPolicy(delays=(0, 0, 0)))
 
     post_id = await _create_post(repo, user_id)
 
@@ -301,9 +299,7 @@ async def test_publication_service_all_attempts_failed(repo_with_user) -> None:
     sender.fail_with = RuntimeError("persistent error")
     publisher = TelegramChannelPublisher(sender)
     resolver = DefaultPublisherResolver(telegram_publisher=publisher, reminder_publisher=None)
-    service = PublicationService(
-        repo, resolver, retry_policy=RetryPolicy(max_attempts=2, delay_seconds=0)
-    )
+    service = PublicationService(repo, resolver, retry_policy=RetryPolicy(delays=(0, 0)))
 
     post_id = await _create_post(repo, user_id)
 
@@ -339,7 +335,10 @@ async def test_publication_service_claim_lost_raises(repo_with_user) -> None:
 
 
 class FlakyTelegramSender:
-    """TelegramSender, который падает первые fail_count вызовов, потом работает."""
+    """TelegramSender, который падает первые fail_count вызовов, потом работает.
+
+    Падает с TimeoutError — повторяемой ошибкой по умолчанию (SPEC-021/022).
+    """
 
     def __init__(self, fail_count: int) -> None:
         self.fail_count = fail_count
@@ -350,4 +349,4 @@ class FlakyTelegramSender:
     ) -> None:
         self.call_count += 1
         if self.call_count <= self.fail_count:
-            raise RuntimeError(f"temporary failure {self.call_count}")
+            raise TimeoutError(f"temporary failure {self.call_count}")

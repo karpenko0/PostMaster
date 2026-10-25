@@ -32,6 +32,7 @@ from postmaster.publishers import (
     DefaultPublisherResolver,
     ReminderPublisher,
     TelegramChannelPublisher,
+    TelegramErrorMapper,
 )
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
@@ -41,7 +42,7 @@ from postmaster.services.missed_post_handler import MissedPostHandler
 from postmaster.services.my_posts_service import MyPostsService
 from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
-from postmaster.services.publication_service import PublicationService
+from postmaster.services.publication_service import PublicationService, RetryPolicy
 from postmaster.services.recipient_resolver import (
     UserServiceReminderRecipientResolver,
 )
@@ -107,14 +108,25 @@ class Application:
         reminder_sender = BotTelegramReminderSender(bot)
 
         recipient_resolver = UserServiceReminderRecipientResolver(user_service)
-        telegram_publisher = TelegramChannelPublisher(photo_sender)
-        reminder_publisher = ReminderPublisher(reminder_sender, recipient_resolver)
+        # Один маппер на всё приложение: он нормализует ошибки Telegram API
+        # и решает, нужно ли повторять публикацию (SPEC-021).
+        error_mapper = TelegramErrorMapper()
+        telegram_publisher = TelegramChannelPublisher(photo_sender, error_mapper=error_mapper)
+        reminder_publisher = ReminderPublisher(
+            reminder_sender, recipient_resolver, error_mapper=error_mapper
+        )
 
         publisher_resolver = DefaultPublisherResolver(
             telegram_publisher=telegram_publisher,
             reminder_publisher=reminder_publisher,
         )
-        publication_service = PublicationService(post_repository, publisher_resolver)
+        publication_service = PublicationService(
+            post_repository,
+            publisher_resolver,
+            # SPEC-022 §4: три повтора с задержками +30s, +2m, +10m.
+            retry_policy=RetryPolicy(),
+            error_mapper=error_mapper,
+        )
 
         scheduler = SchedulerService(
             post_repository=post_repository,

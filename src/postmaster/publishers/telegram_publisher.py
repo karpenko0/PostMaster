@@ -5,6 +5,10 @@ TelegramChannelPublisher публикует photo+caption в target_id (Telegram
 
 Не работает с Telegram API напрямую — только через интерфейс TelegramSender.
 Не управляет Scheduler, retry и финальным статусом — это ответственность PublicationService.
+
+Ошибки Telegram API нормализуются через ``TelegramErrorMapper`` (SPEC-021):
+специфические случаи превращаются в ``TelegramPermissionError``/``TelegramTimeoutError``,
+остальные — в ``TelegramAPIError`` с нормализованным ``TelegramError``.
 """
 
 import logging
@@ -12,6 +16,11 @@ from typing import Protocol
 
 from postmaster.domain.post import Post, PostStatus
 from postmaster.publishers.base import Publisher, PublishResult
+from postmaster.publishers.telegram_errors import (
+    TelegramError,
+    TelegramErrorCode,
+    TelegramErrorMapper,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +45,20 @@ class TelegramTimeoutError(Exception):
     """Таймаут при обращении к Telegram API (SPEC-015 §8 timeout)."""
 
 
+class TelegramAPIError(Exception):
+    """Нормализованная ошибка Telegram API (SPEC-021 §1).
+
+    Несёт в себе ``TelegramError`` с полями code/message/retryable.
+    Поднимается, когда ошибка не относится к уже существующим
+    TelegramPermissionError/TelegramTimeoutError, но также прошла нормализацию
+    и готова к error flow сервиса.
+    """
+
+    def __init__(self, error: TelegramError) -> None:
+        self.error = error
+        super().__init__(error.message)
+
+
 class TelegramSender(Protocol):
     """Минимальный контракт отправки в Telegram, который использует Publisher."""
 
@@ -44,32 +67,30 @@ class TelegramSender(Protocol):
     ) -> object | None: ...
 
 
-# Коды ошибок Telegram API, которые означают «нет прав на публикацию».
-# https://core.telegram.org/bots/api#sendphoto
-_PERMISSION_ERROR_CODES = frozenset(
-    {
-        400,  # Bad Request: chat not found / bot was kicked / etc.
-        403,  # Forbidden: bot was kicked / chat is deactivated
-    }
-)
+def _is_permission_error(exc: Exception) -> bool:
+    """Совместимость с SPEC-015: ошибка «нет прав на публикацию в канал».
 
-# Подстроки в тексте ошибки, указывающие на permission problem.
-_PERMISSION_ERROR_TEXTS = (
-    "chat not found",
-    "bot was kicked",
-    "bot is not a member",
-    "not enough rights",
-    "need administrator rights",
-    "chat is deactivated",
-    "forbidden",
-)
+    Источник истины — TelegramErrorMapper (SPEC-021).
+    """
+    return TelegramErrorMapper().map_exception(exc).code == TelegramErrorCode.PERMISSION
+
+
+def _is_timeout(exc: Exception) -> bool:
+    """Совместимость с SPEC-015: таймаут при обращении к Telegram API.
+
+    Источник истины — TelegramErrorMapper (SPEC-021).
+    """
+    return TelegramErrorMapper().map_exception(exc).code == TelegramErrorCode.TIMEOUT
 
 
 class TelegramChannelPublisher(Publisher):
     """Публикует пост в заданный Telegram-канал через TelegramSender (SPEC-015)."""
 
-    def __init__(self, sender: TelegramSender) -> None:
+    def __init__(
+        self, sender: TelegramSender, error_mapper: TelegramErrorMapper | None = None
+    ) -> None:
         self._sender = sender
+        self._error_mapper = error_mapper or TelegramErrorMapper()
 
     async def publish(self, post: Post) -> PublishResult:
         """Отправляет photo+caption в target_id (Telegram-канал).
@@ -80,6 +101,7 @@ class TelegramChannelPublisher(Publisher):
             FileIdMissingError: telegram_file_id пустой.
             TelegramPermissionError: бот не имеет прав на публикацию в канал.
             TelegramTimeoutError: таймаут при обращении к Telegram API.
+            TelegramAPIError: прочая нормализованная ошибка Telegram API.
         """
         self._validate_post(post)
         try:
@@ -112,23 +134,35 @@ class TelegramChannelPublisher(Publisher):
         if not post.telegram_file_id or not post.telegram_file_id.strip():
             raise FileIdMissingError("telegram_file_id обязателен для TELEGRAM-публикации")
 
-    @staticmethod
-    def _handle_send_error(post: Post, exc: Exception) -> None:
-        """Преобразует ошибки Telegram API в типизированные исключения."""
-        if _is_permission_error(exc):
+    def _handle_send_error(self, post: Post, exc: Exception) -> None:
+        """Преобразует ошибки Telegram API в типизированные исключения (SPEC-021).
+
+        Все исключения сначала нормализуются через ``TelegramErrorMapper``,
+        благодаря чему текст ошибки очищается от Bot Token до того, как он попадёт
+        в логи или в ``Post.error_message`` (SPEC-021 §7).
+        """
+        error = self._error_mapper.map_exception(exc)
+        if error.code == TelegramErrorCode.PERMISSION:
             logger.warning(
                 "Telegram permission denied post_id=%s target=%s",
                 post.id,
                 post.target_id,
             )
-            raise TelegramPermissionError(
-                f"нет прав на публикацию в канал {post.target_id}: {exc}"
-            ) from exc
-        if _is_timeout(exc):
-            logger.warning("Telegram timeout post_id=%s", post.id)
-            raise TelegramTimeoutError(f"таймаут при обращении к Telegram API: {exc}") from exc
-        # Прочие ошибки пробрасываются без обёртки.
-        raise exc
+            raise TelegramPermissionError(error.message) from exc
+        if error.code == TelegramErrorCode.TIMEOUT:
+            logger.warning(
+                "Telegram timeout post_id=%s code=%s",
+                post.id,
+                error.code.value,
+            )
+            raise TelegramTimeoutError(error.message) from exc
+        logger.warning(
+            "Telegram API error post_id=%s code=%s retryable=%s",
+            post.id,
+            error.code.value,
+            error.retryable,
+        )
+        raise TelegramAPIError(error) from exc
 
     @staticmethod
     def _extract_message_id(message: object | None) -> str | None:
@@ -136,21 +170,3 @@ class TelegramChannelPublisher(Publisher):
             value = message.get("message_id")
             return None if value is None else str(value)
         return None
-
-
-def _is_permission_error(exc: Exception) -> bool:
-    """Эвристика: ошибка «нет прав на публикацию в канал»."""
-    code = getattr(exc, "error_code", None)
-    if code in _PERMISSION_ERROR_CODES:
-        message = str(exc).lower()
-        return any(text in message for text in _PERMISSION_ERROR_TEXTS)
-    message = str(exc).lower()
-    return any(text in message for text in _PERMISSION_ERROR_TEXTS)
-
-
-def _is_timeout(exc: Exception) -> bool:
-    """Эвристика: таймаут при обращении к Telegram API."""
-    if isinstance(exc, TimeoutError):
-        return True
-    message = str(exc).lower()
-    return "timeout" in message or "timed out" in message

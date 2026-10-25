@@ -19,10 +19,12 @@ import pytest
 
 from postmaster.domain.post import Post, PostStatus, PublicationType
 from postmaster.publishers.base import PublishResult
+from postmaster.publishers.telegram_errors import TelegramErrorCode
 from postmaster.publishers.telegram_publisher import (
     FileIdMissingError,
     InvalidPostStatusError,
     TargetMissingError,
+    TelegramAPIError,
     TelegramChannelPublisher,
     TelegramPermissionError,
     TelegramTimeoutError,
@@ -255,14 +257,19 @@ async def test_telegram_publisher_timeout_via_text() -> None:
 
 
 async def test_telegram_publisher_other_error_propagates() -> None:
-    """Не-403/не-timeout ошибка Telegram пробрасывается без обёртки."""
+    """Не-403/не-timeout ошибка Telegram нормализуется в TelegramAPIError (SPEC-021)."""
     sender = RecordingTelegramSender()
     sender.fail_with = RuntimeError("network error")
     publisher = TelegramChannelPublisher(sender)
     post = _make_post()
 
-    with pytest.raises(RuntimeError, match="network error"):
+    with pytest.raises(TelegramAPIError) as exc_info:
         await publisher.publish(post)
+
+    error = exc_info.value.error
+    assert error.code == TelegramErrorCode.NETWORK
+    assert error.retryable is True
+    assert "network error" in error.message
 
 
 async def test_telegram_publisher_does_not_manage_retry() -> None:
@@ -272,7 +279,7 @@ async def test_telegram_publisher_does_not_manage_retry() -> None:
     publisher = TelegramChannelPublisher(sender)
     post = _make_post()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(TelegramAPIError):
         await publisher.publish(post)
 
     assert len(sender.calls) == 1  # Одна попытка, без retry

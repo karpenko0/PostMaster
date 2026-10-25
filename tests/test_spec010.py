@@ -312,10 +312,11 @@ async def test_publication_service_retries_on_failure(post_repo) -> None:
     """При ошибке Publisher сервис делает несколько попыток, затем FAILED."""
     repo, user_id, _ = post_repo
     sender = RecordingTelegramSender()
-    sender.fail_with = RuntimeError("temporary error")
+    # TimeoutError — повторяемая ошибка (SPEC-021 §4, SPEC-022 §1).
+    sender.fail_with = TimeoutError("temporary error")
     publisher = TelegramChannelPublisher(sender)
     resolver = DefaultPublisherResolver(telegram_publisher=publisher)
-    retry_policy = RetryPolicy(max_attempts=3, delay_seconds=0.01)
+    retry_policy = RetryPolicy(delays=(0, 0, 0))
     service = PublicationService(repo, resolver, retry_policy=retry_policy)
     post_id = await _create_post(
         repo,
@@ -327,7 +328,7 @@ async def test_publication_service_retries_on_failure(post_repo) -> None:
     with pytest.raises(PublicationError):
         await service.publish(post_id)
 
-    assert len(sender.calls) == 3  # Три попытки
+    assert len(sender.calls) == 4  # 1 попытка + 3 повтора
     result = await repo.get_by_id(post_id)
     assert result is not None
     assert result.status == PostStatus.FAILED
@@ -339,7 +340,7 @@ async def test_publication_service_succeeds_on_retry(post_repo) -> None:
     sender = FlakyTelegramSender(fail_count=1)
     publisher = TelegramChannelPublisher(sender)
     resolver = DefaultPublisherResolver(telegram_publisher=publisher)
-    retry_policy = RetryPolicy(max_attempts=3, delay_seconds=0.01)
+    retry_policy = RetryPolicy(delays=(0, 0, 0))
     service = PublicationService(repo, resolver, retry_policy=retry_policy)
     post_id = await _create_post(
         repo,
@@ -602,7 +603,7 @@ class FlakyTelegramSender:
     ) -> None:
         self.call_count += 1
         if self.call_count <= self.fail_count:
-            raise RuntimeError(f"temporary failure {self.call_count}")
+            raise TimeoutError(f"temporary failure {self.call_count}")
 
 
 async def _wait_for(predicate, timeout: float = 5.0) -> None:

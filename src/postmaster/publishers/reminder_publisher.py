@@ -7,6 +7,9 @@ ReminderPublisher отправляет владельцу поста:
 
 Не работает с Telegram API напрямую — только через интерфейс TelegramReminderSender.
 Возвращает PublishResult. Финальный статус (PUBLISHED) выставляет PublicationService.
+
+Ошибки Telegram API нормализуются через ``TelegramErrorMapper`` (SPEC-021):
+``BLOCKED`` → TelegramBlockedError, остальное → TelegramAPIError.
 """
 
 import logging
@@ -14,6 +17,11 @@ from typing import Protocol
 
 from postmaster.domain.post import Post
 from postmaster.publishers.base import Publisher, PublishResult
+from postmaster.publishers.telegram_errors import (
+    TelegramErrorCode,
+    TelegramErrorMapper,
+)
+from postmaster.publishers.telegram_publisher import TelegramAPIError
 from postmaster.utils.timezone_format import format_local_datetime
 
 logger = logging.getLogger(__name__)
@@ -61,9 +69,11 @@ class ReminderPublisher(Publisher):
         self,
         sender: TelegramReminderSender,
         recipient_resolver: ReminderRecipientResolver,
+        error_mapper: TelegramErrorMapper | None = None,
     ) -> None:
         self._sender = sender
         self._recipients = recipient_resolver
+        self._error_mapper = error_mapper or TelegramErrorMapper()
 
     async def publish(self, post: Post) -> PublishResult:
         """Отправляет текст + фото пользователю-владельцу поста.
@@ -72,6 +82,7 @@ class ReminderPublisher(Publisher):
             PhotoDataMissingError: telegram_file_id пустой.
             UserNotFoundError: владелец поста не найден в БД.
             TelegramBlockedError: пользователь заблокировал бота.
+            TelegramAPIError: прочая нормализованная ошибка Telegram API (SPEC-021).
         """
         if not post.telegram_file_id or not post.telegram_file_id.strip():
             raise PhotoDataMissingError("telegram_file_id обязателен для Reminder")
@@ -88,11 +99,7 @@ class ReminderPublisher(Publisher):
         try:
             text_message = await self._sender.send_message(chat_id=telegram_user_id, text=text)
         except Exception as exc:
-            if _is_bot_blocked(exc):
-                raise TelegramBlockedError(
-                    f"пользователь заблокировал бота user_id={post.user_id}"
-                ) from exc
-            raise
+            self._handle_send_error(post, exc, what="send_message")
 
         try:
             photo_message = await self._sender.send_photo(
@@ -101,11 +108,7 @@ class ReminderPublisher(Publisher):
                 caption=post.caption,
             )
         except Exception as exc:
-            if _is_bot_blocked(exc):
-                raise TelegramBlockedError(
-                    f"пользователь заблокировал бота user_id={post.user_id}"
-                ) from exc
-            raise
+            self._handle_send_error(post, exc, what="send_photo")
 
         external_id = self._extract_message_id(photo_message) or self._extract_message_id(
             text_message
@@ -118,6 +121,25 @@ class ReminderPublisher(Publisher):
         )
         return PublishResult(post_id=post.id, external_id=external_id)
 
+    def _handle_send_error(self, post: Post, exc: Exception, *, what: str) -> None:
+        """Преобразует ошибку Telegram API в типизированное исключение (SPEC-021)."""
+        error = self._error_mapper.map_exception(exc)
+        if error.code == TelegramErrorCode.BLOCKED:
+            logger.warning(
+                "Telegram reminder blocked post_id=%s user_id=%s",
+                post.id,
+                post.user_id,
+            )
+            raise TelegramBlockedError(error.message) from exc
+        logger.warning(
+            "Telegram reminder API error post_id=%s what=%s code=%s retryable=%s",
+            post.id,
+            what,
+            error.code.value,
+            error.retryable,
+        )
+        raise TelegramAPIError(error) from exc
+
     @staticmethod
     def _extract_message_id(message: object | None) -> str | None:
         if isinstance(message, dict):
@@ -127,8 +149,19 @@ class ReminderPublisher(Publisher):
 
 
 def _is_bot_blocked(exc: Exception) -> bool:
-    """Эвристика: ошибка «бот заблокирован пользователем»."""
-    if getattr(exc, "error_code", None) == 403:
-        return True
-    message = str(exc).lower()
-    return "bot was blocked" in message or "user is deactivated" in message
+    """Совместимость с SPEC-014: ошибка «бот заблокирован пользователем».
+
+    Источник истины — TelegramErrorMapper (SPEC-021).
+    """
+    return TelegramErrorMapper().map_exception(exc).code == TelegramErrorCode.BLOCKED
+
+
+__all__ = [
+    "PhotoDataMissingError",
+    "REMINDER_TEXT_TEMPLATE",
+    "ReminderPublisher",
+    "ReminderRecipientResolver",
+    "TelegramBlockedError",
+    "TelegramReminderSender",
+    "UserNotFoundError",
+]

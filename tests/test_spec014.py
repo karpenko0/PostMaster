@@ -31,6 +31,8 @@ from postmaster.publishers.reminder_publisher import (
     UserNotFoundError,
     _is_bot_blocked,
 )
+from postmaster.publishers.telegram_errors import TelegramErrorCode
+from postmaster.publishers.telegram_publisher import TelegramAPIError
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.recipient_resolver import (
@@ -243,27 +245,33 @@ async def test_reminder_blocked_bot_on_send_photo(post_repo) -> None:
 
 
 async def test_reminder_non_blocked_error_propagates(post_repo) -> None:
-    """Если Telegram вернул не-403 ошибку — исключение пробрасывается."""
+    """Если Telegram вернул не-blocked ошибку — TelegramAPIError (SPEC-021)."""
     repo, user_id = post_repo
     sender = RecordingReminderSender()
     sender.fail_message_with = RuntimeError("network timeout")
     publisher = ReminderPublisher(sender, StaticRecipientResolver(telegram_user_id=555))
     post = _make_post(user_id)
 
-    with pytest.raises(RuntimeError, match="network timeout"):
+    with pytest.raises(TelegramAPIError) as exc_info:
         await publisher.publish(post)
+
+    assert exc_info.value.error.code == TelegramErrorCode.TIMEOUT
+    assert exc_info.value.error.retryable is True
 
 
 async def test_reminder_photo_error_after_text_succeeds(post_repo) -> None:
-    """Если текст отправлен, но фото не отправлено — ошибка пробрасывается."""
+    """Если текст отправлен, но фото не отправлено — нормализованная ошибка (SPEC-021)."""
     repo, user_id = post_repo
     sender = RecordingReminderSender()
     sender.fail_photo_with = RuntimeError("photo upload failed")
     publisher = ReminderPublisher(sender, StaticRecipientResolver(telegram_user_id=555))
     post = _make_post(user_id)
 
-    with pytest.raises(RuntimeError, match="photo upload failed"):
+    with pytest.raises(TelegramAPIError) as exc_info:
         await publisher.publish(post)
+
+    assert exc_info.value.error.code == TelegramErrorCode.UNKNOWN
+    assert exc_info.value.error.retryable is False
 
     # Текст был отправлен, плюс попытка отправки фото (которая упала)
     assert len(sender.calls) == 2
@@ -313,9 +321,15 @@ async def test_reminder_with_user_service_resolver(tmp_path: Path) -> None:
 
 
 def test_is_bot_blocked_detects_403_error_code() -> None:
-    """_is_bot_blocked детектирует исключения с error_code=403."""
-    exc = FakeTelegramException(403, "Forbidden")
-    assert _is_bot_blocked(exc) is True
+    """_is_bot_blocked детектирует исключения с error_code=403 и явным BLOCKED-текстом.
+
+    Голый 403 'Forbidden' без указания причины теперь относится к PERMISSION,
+    а не к BLOCKED (SPEC-021): блок — это когда пользователь заблокировал бота.
+    """
+    assert (
+        _is_bot_blocked(FakeTelegramException(403, "Forbidden: bot was blocked by the user"))
+        is True
+    )
 
 
 def test_is_bot_blocked_detects_blocked_text() -> None:
