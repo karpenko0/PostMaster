@@ -17,6 +17,7 @@ from typing import Protocol
 from postmaster.domain.post import Post, PostStatus
 from postmaster.publishers.base import Publisher, PublishResult
 from postmaster.publishers.telegram_errors import (
+    DEFAULT_ERROR_MAPPER,
     TelegramError,
     TelegramErrorCode,
     TelegramErrorMapper,
@@ -72,7 +73,7 @@ def _is_permission_error(exc: Exception) -> bool:
 
     Источник истины — TelegramErrorMapper (SPEC-021).
     """
-    return TelegramErrorMapper().map_exception(exc).code == TelegramErrorCode.PERMISSION
+    return DEFAULT_ERROR_MAPPER.map_exception(exc).code == TelegramErrorCode.PERMISSION
 
 
 def _is_timeout(exc: Exception) -> bool:
@@ -80,7 +81,7 @@ def _is_timeout(exc: Exception) -> bool:
 
     Источник истины — TelegramErrorMapper (SPEC-021).
     """
-    return TelegramErrorMapper().map_exception(exc).code == TelegramErrorCode.TIMEOUT
+    return DEFAULT_ERROR_MAPPER.map_exception(exc).code == TelegramErrorCode.TIMEOUT
 
 
 class TelegramChannelPublisher(Publisher):

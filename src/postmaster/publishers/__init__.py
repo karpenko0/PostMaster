@@ -16,6 +16,7 @@ from postmaster.publishers.resolver import (
     UnknownPublicationTypeError,
 )
 from postmaster.publishers.telegram_errors import (
+    DEFAULT_ERROR_MAPPER,
     RETRYABLE_CODES,
     TelegramError,
     TelegramErrorCode,
@@ -33,6 +34,7 @@ from postmaster.publishers.telegram_publisher import (
 )
 
 __all__ = [
+    "DEFAULT_ERROR_MAPPER",
     "DefaultPublisherResolver",
     "FileIdMissingError",
     "InvalidPostStatusError",

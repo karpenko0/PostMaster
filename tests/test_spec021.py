@@ -192,6 +192,64 @@ def test_mapper_invalid_photo() -> None:
     assert error.code == TelegramErrorCode.INVALID_FILE
 
 
+def test_mapper_invalid_caption_too_long() -> None:
+    """400 + 'MEDIA_CAPTION_TOO_LONG' → INVALID_FILE (caption длиннее 1024)."""
+    error = TelegramErrorMapper().map_exception(
+        FakeTelegramException(400, "Bad Request: MEDIA_CAPTION_TOO_LONG")
+    )
+    assert error.code == TelegramErrorCode.INVALID_FILE
+    assert error.retryable is False
+
+
+def test_mapper_invalid_message_too_long() -> None:
+    """400 + 'Message is too long' → INVALID_FILE."""
+    error = TelegramErrorMapper().map_exception(
+        FakeTelegramException(400, "Bad Request: Message is too long")
+    )
+    assert error.code == TelegramErrorCode.INVALID_FILE
+
+
+def test_mapper_invalid_media_empty() -> None:
+    """400 + 'MEDIA_EMPTY' → INVALID_FILE (Telegram snake_case код)."""
+    error = TelegramErrorMapper().map_exception(
+        FakeTelegramException(400, "Bad Request: MEDIA_EMPTY")
+    )
+    assert error.code == TelegramErrorCode.INVALID_FILE
+
+
+def test_mapper_invalid_photo_dimensions() -> None:
+    """400 + 'PHOTO_INVALID_DIMENSIONS' → INVALID_FILE."""
+    error = TelegramErrorMapper().map_exception(
+        FakeTelegramException(400, "Bad Request: PHOTO_INVALID_DIMENSIONS")
+    )
+    assert error.code == TelegramErrorCode.INVALID_FILE
+
+
+def test_mapper_unavailable_via_retry_after_text() -> None:
+    """429 + 'RetryAfter: 30' → UNAVAILABLE, retryable=True."""
+    error = TelegramErrorMapper().map_exception(
+        FakeTelegramException(429, "Too Many Requests: retry after 30")
+    )
+    assert error.code == TelegramErrorCode.UNAVAILABLE
+    assert error.retryable is True
+
+
+def test_mapper_unavailable_via_retry_after_without_code() -> None:
+    """Текст 'RetryAfter' без error_code → UNAVAILABLE."""
+    error = TelegramErrorMapper().map_exception(RuntimeError("RetryAfter: 12"))
+    assert error.code == TelegramErrorCode.UNAVAILABLE
+    assert error.retryable is True
+
+
+def test_mapper_unavailable_via_500() -> None:
+    """500 Internal Server Error → UNAVAILABLE."""
+    error = TelegramErrorMapper().map_exception(
+        FakeTelegramException(500, "Internal Server Error: query processing is slow")
+    )
+    assert error.code == TelegramErrorCode.UNAVAILABLE
+    assert error.retryable is True
+
+
 def test_mapper_file_too_big() -> None:
     """400 + 'file is too big' → INVALID_FILE."""
     error = TelegramErrorMapper().map_exception(
@@ -391,14 +449,19 @@ async def test_telegram_publisher_does_not_swallow_exception() -> None:
 class _RecordingReminderSender:
     """Заглушка TelegramReminderSender."""
 
-    def __init__(self, fail_message_with: Exception | None = None) -> None:
-        self._fail = fail_message_with
+    def __init__(
+        self,
+        fail_message_with: Exception | None = None,
+        fail_photo_with: Exception | None = None,
+    ) -> None:
+        self.fail_message_with = fail_message_with
+        self.fail_photo_with = fail_photo_with
         self.calls: list[dict] = []
 
     async def send_message(self, *, chat_id: int, text: str) -> dict | None:
         self.calls.append({"method": "send_message", "text": text})
-        if self._fail is not None:
-            raise self._fail
+        if self.fail_message_with is not None:
+            raise self.fail_message_with
         return {"message_id": 1}
 
     async def send_photo(
@@ -407,6 +470,8 @@ class _RecordingReminderSender:
         self.calls.append(
             {"method": "send_photo", "photo_file_id": photo_file_id, "caption": caption}
         )
+        if self.fail_photo_with is not None:
+            raise self.fail_photo_with
         return {"message_id": 2}
 
 
@@ -462,6 +527,49 @@ async def test_reminder_publisher_message_has_no_token() -> None:
     with pytest.raises(TelegramAPIError) as info:
         await publisher.publish(_make_reminder_post())
     assert SAMPLE_TOKEN not in info.value.error.message
+
+
+async def test_reminder_publisher_photo_network_error_after_text_sent() -> None:
+    """Текст отправлен, фото упало с NETWORK → TelegramAPIError(retryable=True).
+
+    Текст не отправляется повторно: ReminderPublisher делает ровно один вызов
+    send_message и один вызов send_photo.
+    """
+    sender = _RecordingReminderSender()
+    sender.fail_photo_with = RuntimeError("connection error on sendPhoto")
+    publisher = ReminderPublisher(sender, _StaticRecipientResolver(555))
+
+    with pytest.raises(TelegramAPIError) as info:
+        await publisher.publish(_make_reminder_post())
+
+    assert info.value.error.code == TelegramErrorCode.NETWORK
+    assert info.value.error.retryable is True
+    assert [call["method"] for call in sender.calls] == ["send_message", "send_photo"]
+
+
+async def test_reminder_publisher_photo_blocked_after_text_sent() -> None:
+    """Текст отправлен, фото упало с BLOCKED → TelegramBlockedError (retryable=False)."""
+    sender = _RecordingReminderSender()
+    sender.fail_photo_with = FakeTelegramException(403, "Forbidden: bot was blocked by the user")
+    publisher = ReminderPublisher(sender, _StaticRecipientResolver(555))
+
+    with pytest.raises(TelegramBlockedError):
+        await publisher.publish(_make_reminder_post())
+
+    assert [call["method"] for call in sender.calls] == ["send_message", "send_photo"]
+
+
+async def test_reminder_publisher_photo_invalid_file_after_text_sent() -> None:
+    """Текст отправлен, фото упало с INVALID_FILE → TelegramAPIError(retryable=False)."""
+    sender = _RecordingReminderSender()
+    sender.fail_photo_with = FakeTelegramException(400, "Bad Request: invalid file_id")
+    publisher = ReminderPublisher(sender, _StaticRecipientResolver(555))
+
+    with pytest.raises(TelegramAPIError) as info:
+        await publisher.publish(_make_reminder_post())
+
+    assert info.value.error.code == TelegramErrorCode.INVALID_FILE
+    assert info.value.error.retryable is False
 
 
 # === PublicationService: retry только для retryable ========================

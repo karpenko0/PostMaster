@@ -1,8 +1,8 @@
-"""Настройки приложения (SPEC-001, SPEC-002, SPEC-026).
+"""Настройки приложения (SPEC-001, SPEC-002, SPEC-023, SPEC-026).
 
 Значения читаются из переменных окружения. Файл .env для локальной разработки
 загружается через python-dotenv, но переменные окружения имеют приоритет.
-Секреты не попадают ни в repr, ни в текст ошибок (SPEC-023).
+Секреты не попадают ни в repr, ни в текст ошибок (SPEC-023 §6).
 """
 
 import re
@@ -20,6 +20,10 @@ DEFAULT_TIMEZONE = "Europe/Moscow"
 
 # Формат токена Telegram Bot API: "<числовой id бота>:<секретная часть>".
 _TOKEN_PATTERN = re.compile(r"\d{5,}:[A-Za-z0-9_-]{20,}")
+
+# Поиск credentials в DATABASE_URL: "user:password@host". Пароль — секрет, который
+# нельзя выводить в логи или error_message (SPEC-023 §6, SPEC-027 §7).
+_URL_CREDENTIALS_PATTERN = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
@@ -52,6 +56,28 @@ class Settings(BaseSettings):
         default=None,
         description="Канал для режима TELEGRAM (TELEGRAM_TARGET_ID).",
     )
+
+    @property
+    def secret_values(self) -> tuple[str, ...]:
+        """Все секретные значения Settings, которые нельзя выводить в логи (SPEC-023 §4).
+
+        Включает Bot Token и пароль из DATABASE_URL, если он есть.
+        Гарантирует, что приложение редактирует все секреты единообразно —
+        централизованный источник истины для redaction.
+        """
+        values: list[str] = [self.bot_token.get_secret_value()]
+        # Если DATABASE_URL содержит user:password@... — выводим его целиком,
+        # чтобы redaction скрыла и логин, и пароль.
+        if _URL_CREDENTIALS_PATTERN.search(self.database_url):
+            values.append(self.database_url)
+        # Убираем дубликаты и пустые значения.
+        seen: set[str] = set()
+        unique: list[str] = []
+        for value in values:
+            if value and value not in seen:
+                seen.add(value)
+                unique.append(value)
+        return tuple(unique)
 
     @model_validator(mode="after")
     def _check_post_mode(self) -> "Settings":

@@ -5,11 +5,21 @@
 Реализован `TelegramErrorMapper` (нормализация исключений Telegram API в
 `TelegramError(code, message, retryable)`) и его интеграция в
 `TelegramChannelPublisher`, `ReminderPublisher`, `PublicationService` и `app.py`.
-Полный прогон тестов: **611 passed**, 1 skipped, 1 deselected (только
+Полный прогон тестов: **621 passed**, 1 skipped, 1 deselected (только
 Windows-несовместимый SIGTERM-subprocess-тест). `ruff check .` и
 `ruff format --check .` — успешно.
 
 Исходный текст SPEC-021: `docs/specs/SPEC-021-обработка-ошибок-telegram-api.md`.
+
+## Доработки 2026-10-25 (после первой реализации)
+
+| # | Изменение | Файл | Обоснование |
+|---|---|---|---|
+| W1 | Расширены `_INVALID_FILE_TEXTS` и `_UNAVAILABLE_TEXTS` | `telegram_errors.py` | Реальные коды Telegram `MEDIA_CAPTION_TOO_LONG`, `MEDIA_EMPTY`, `MESSAGE_TOO_LONG`, `PHOTO_INVALID_DIMENSIONS`, `RetryAfter`, `500` теперь корректно классифицируются вместо попадания в UNKNOWN |
+| W2 | Добавлен модульный singleton `DEFAULT_ERROR_MAPPER` | `telegram_errors.py` | Legacy-хелперы `_is_permission_error`, `_is_timeout`, `_is_bot_blocked` используют общий экземпляр вместо создания нового на каждый вызов |
+| W3 | `_RecordingReminderSender` поддерживает `fail_photo_with` через конструктор | `tests/test_spec021.py` | Тесты text-OK/photo-failed стали однострочными; public API совпадает с `test_spec014.py` |
+| W4 | 7 новых тестов: caption-too-long, message-too-long, MEDIA_EMPTY, PHOTO_INVALID_DIMENSIONS, 429 RetryAfter (с кодом и без), 500 | `tests/test_spec021.py` | Покрытие W1 |
+| W5 | 3 новых теста «ReminderPublisher: text OK, photo failed» (NETWORK/BLOCKED/INVALID_FILE) | `tests/test_spec021.py` | Гарантирует, что send_message не отправляется повторно при сбое send_photo, и retryable-флаг корректно доходит до `PublicationService` |
 
 ## Матрица приёмки
 
@@ -25,7 +35,7 @@ Windows-несовместимый SIGTERM-subprocess-тест). `ruff check .` 
 
 | Проверка | Тест | Статус |
 |---|---|---|
-| all error mappings | `test_mapper_timeout_via_timeout_error/text`, `test_mapper_network_via_text/connection_error_type/os_error`, `test_mapper_unavailable_via_429/502/text`, `test_mapper_permission_*` (4 теста), `test_mapper_blocked_*` (2), `test_mapper_invalid_file_*` (3) | ✅ 20 тестов покрывают все коды и их варианты |
+| all error mappings | `test_mapper_timeout_via_timeout_error/text`, `test_mapper_network_via_text/connection_error_type/os_error`, `test_mapper_unavailable_via_429/502/text/retry_after_text/retry_after_without_code/500`, `test_mapper_permission_*` (4 теста), `test_mapper_blocked_*` (2), `test_mapper_invalid_*` (5: invalid_file_id, invalid_photo, invalid_caption_too_long, invalid_message_too_long, invalid_media_empty, invalid_photo_dimensions) | ✅ 30 тестов покрывают все коды и их варианты |
 | unknown error | `test_mapper_unknown_generic_exception`, `test_mapper_unknown_value_error`, `test_mapper_unknown_with_unrelated_400`, `test_publication_service_does_not_retry_on_unknown` | ✅ UNKNOWN → non-retryable, FAILED после 1 попытки |
 | secret redaction | `test_secret_token_redacted_in_message`, `test_secret_token_redacted_in_telegram_api_error`, `test_secret_token_redacted_in_publication_service_error_message`, `test_redact_secrets_function_handles_multiple_tokens`, `test_redact_secrets_keeps_safe_text`, `test_publication_service_post_error_message_has_no_token`, `test_telegram_publisher_permission_message_has_no_token`, `test_reminder_publisher_message_has_no_token` | ✅ Токен не попадает в `TelegramError.message`, `TelegramAPIError`, `TelegramPermissionError`, `Post.error_message` |
 
@@ -44,6 +54,7 @@ Windows-несовместимый SIGTERM-subprocess-тест). `ruff check .` 
 | D9 | `redact_secrets()` — общая функция редактирования | Используется и в `TelegramErrorMapper`, и доступна отдельно для логов и тестов |
 | D10 | `TelegramError.message` начинается с кода (`"NETWORK: ..."`) и обрезается до 500 символов | Диагностика в БД и логах; `Post.error_message` имеет ограничение |
 | D11 | В `app.py` маппер создаётся один и передаётся в оба Publisher и в `PublicationService` | Единая классификация на всё приложение, нет дублирования эвристик |
+| D12 | `TelegramErrorMapper.map_exception` не переклассифицирует уже нормализованные `TelegramAPIError` | Повторный проход через mapper в `PublicationService._is_retryable` не теряет исходный `code`/`retryable`; используется несущий `error` атрибут |
 
 ## Сценарии
 
@@ -169,3 +180,12 @@ python -m pytest -q -p no:cacheprovider
 python -m ruff check .
 python -m ruff format --check .
 ```
+
+## Матрица доработок (статус после W1–W5)
+
+| Изменение | Статус | Покрытие тестами |
+|---|---|---|
+| Расширение `_INVALID_FILE_TEXTS` | ✅ | `test_mapper_invalid_caption_too_long`, `test_mapper_invalid_message_too_long`, `test_mapper_invalid_media_empty`, `test_mapper_invalid_photo_dimensions` |
+| Расширение `_UNAVAILABLE_TEXTS` (RetryAfter, 500) | ✅ | `test_mapper_unavailable_via_retry_after_text`, `test_mapper_unavailable_via_retry_after_without_code`, `test_mapper_unavailable_via_500` |
+| `DEFAULT_ERROR_MAPPER` singleton | ✅ | Импортируется в `test_spec014.py`/`test_spec015.py` через legacy-хелперы (8 тестов) |
+| `_RecordingReminderSender.fail_photo_with` через конструктор | ✅ | `test_reminder_publisher_photo_network_error_after_text_sent`, `test_reminder_publisher_photo_blocked_after_text_sent`, `test_reminder_publisher_photo_invalid_file_after_text_sent` |

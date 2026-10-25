@@ -282,7 +282,7 @@ def main() -> None:
         print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
         raise SystemExit(EXIT_CONFIG_ERROR) from None
 
-    configure_logging(settings.log_level, secrets=[settings.bot_token.get_secret_value()])
+    configure_logging(settings.log_level, secrets=settings.secret_values)
     try:
         exit_code = asyncio.run(_serve(settings))
     except KeyboardInterrupt:

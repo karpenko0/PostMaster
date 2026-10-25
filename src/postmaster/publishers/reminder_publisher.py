@@ -18,6 +18,7 @@ from typing import Protocol
 from postmaster.domain.post import Post
 from postmaster.publishers.base import Publisher, PublishResult
 from postmaster.publishers.telegram_errors import (
+    DEFAULT_ERROR_MAPPER,
     TelegramErrorCode,
     TelegramErrorMapper,
 )
@@ -153,7 +154,7 @@ def _is_bot_blocked(exc: Exception) -> bool:
 
     Источник истины — TelegramErrorMapper (SPEC-021).
     """
-    return TelegramErrorMapper().map_exception(exc).code == TelegramErrorCode.BLOCKED
+    return DEFAULT_ERROR_MAPPER.map_exception(exc).code == TelegramErrorCode.BLOCKED
 
 
 __all__ = [

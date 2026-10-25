@@ -118,6 +118,9 @@ _UNAVAILABLE_TEXTS = (
     "too many requests",
     "try again later",
     "server error",
+    # Telegram отвечает 429 с текстом "RetryAfter: N".
+    "retry after",
+    "retryafter",
 )
 
 _PERMISSION_TEXTS = (
@@ -154,6 +157,16 @@ _INVALID_FILE_TEXTS = (
     "file_reference_expired",
     "failed to get http url content",
     "image_process_failed",
+    # Подпись к фото длиннее лимита Telegram (1024 символа) — контент невалиден.
+    "media_caption_too_long",
+    "message is too long",
+    "message_too_long",
+    # Медиа пустое или не поддерживается форматом.
+    "media_empty",
+    "invalid_media",
+    "wrong file type",
+    "video is too long",
+    "photo must be",
 )
 
 # Коды ответов Telegram, которые означают временную недоступность сервиса.
@@ -247,3 +260,8 @@ def _contains(text: str, needles: tuple[str, ...]) -> bool:
 def redact_secrets(text: str) -> str:
     """Убирает из текста Bot Token и любые другие секреты (SPEC-021 §7)."""
     return _TOKEN_PATTERN.sub(MASK, text)
+
+
+#: Общий экземпляр маппера. Класс не хранит состояния, поэтому одного
+#: экземпляра достаточно для всех вызывающих (legacy-хелперы и Publisher'ы).
+DEFAULT_ERROR_MAPPER = TelegramErrorMapper()
