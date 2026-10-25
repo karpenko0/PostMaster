@@ -117,6 +117,18 @@ class PostRepository:
             model = await session.get(PostModel, post_id)
             return None if model is None else _to_domain(model)
 
+    async def get_user_post(self, post_id: int, user_id: int) -> Post | None:
+        """Возвращает пост только если он принадлежит user_id (SPEC-024 §1, §8).
+
+        Для пользовательских операций используйте этот метод вместо ``get_by_id``:
+        фильтрация по ``user_id`` происходит в SQL, чужие посты не возвращаются
+        и не отличаются от «не существует» (SPEC-024 §7).
+        """
+        statement = select(PostModel).where(PostModel.id == post_id, PostModel.user_id == user_id)
+        async with self._session_factory() as session:
+            model = (await session.scalars(statement)).first()
+            return None if model is None else _to_domain(model)
+
     async def list_pending_by_user(self, user_id: int) -> list[Post]:
         """Пользователь видит только собственные PENDING-записи в порядке времени."""
         statement = (
