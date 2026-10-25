@@ -128,9 +128,12 @@ def register_dialog_handlers(
         if sender is None:
             return
         # message.photo — массив PhotoSize; максимальный размер и метаданные выбирает сервис
-        # (BR-004-04, §22). Фото скачивать не нужно (BR-004-03).
+        # (BR-004-04, §22). Фото скачивать не нужно (BR-004-03). Подпись передаётся отдельным
+        # полем message.caption (SPEC-020).
         try:
-            photo = photo_service.handle_photo(sender.id, list(message.photo or []))
+            photo = photo_service.handle_photo(
+                sender.id, list(message.photo or []), caption=message.caption
+            )
         except PhotoProcessingError:
             # ERR-004-01…ERR-004-03: FSM не меняется, пользователь получает запрос фотографии.
             await bot.send_message(message.chat.id, PHOTO_REQUEST)

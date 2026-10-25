@@ -27,13 +27,18 @@ class PhotoSizeLike(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class PhotoData:
-    """Метаданные выбранной фотографии (§23). Бинарные данные изображения не входят."""
+    """Метаданные выбранной фотографии (§23). Бинарные данные изображения не входят.
+
+    caption — необязательная подпись к фото (SPEC-020): Telegram передаёт её в том же
+    сообщении. None означает «нет подписи».
+    """
 
     file_id: str
     file_unique_id: str
     file_size: int | None
     width: int
     height: int
+    caption: str | None = None
 
 
 def select_largest_photo(photo_sizes: Sequence[PhotoSizeLike]) -> PhotoData:

@@ -193,7 +193,7 @@ async def test_help_works_after_other_commands(running_app, fake_telegram) -> No
 
     # /my_posts в этом состоянии
     fake_telegram.add_text_message("/my_posts", chat_id=1000, user_id=1000)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
+    await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
 
     # Состояние не изменилось
     state = await running_app.bot.get_state(1000, 1000)
@@ -201,7 +201,7 @@ async def test_help_works_after_other_commands(running_app, fake_telegram) -> No
 
     # /help
     fake_telegram.add_text_message("/help", chat_id=1000, user_id=1000)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+    await wait_until(lambda: len(fake_telegram.sent_messages) == 4)
 
     # Состояние всё ещё не изменилось
     state = await running_app.bot.get_state(1000, 1000)

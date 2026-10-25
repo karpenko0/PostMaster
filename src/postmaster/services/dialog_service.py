@@ -44,10 +44,16 @@ PHOTO_UNIQUE_ID_KEY = "telegram_file_unique_id"
 PHOTO_FILE_SIZE_KEY = "file_size"
 PHOTO_WIDTH_KEY = "width"
 PHOTO_HEIGHT_KEY = "height"
+# Подпись к фото (SPEC-020): необязательная, хранится в черновике и передаётся в Post.
+CAPTION_KEY = "caption"
 
 
 def _photo_draft(photo: PhotoData) -> dict[str, str]:
-    """Данные фото для черновика. Значения строками: хранилище состояний хранит строки."""
+    """Данные фото для черновика. Значения строками: хранилище состояний хранит строки.
+
+    caption сохраняется только если задан (SPEC-020 §1): отсутствие caption не должно
+    попадать в БД как пустая строка.
+    """
     draft = {
         PHOTO_FILE_ID_KEY: photo.file_id,
         PHOTO_UNIQUE_ID_KEY: photo.file_unique_id,
@@ -56,6 +62,8 @@ def _photo_draft(photo: PhotoData) -> dict[str, str]:
     }
     if photo.file_size is not None:
         draft[PHOTO_FILE_SIZE_KEY] = str(photo.file_size)
+    if photo.caption is not None:
+        draft[CAPTION_KEY] = photo.caption
     return draft
 
 
@@ -187,6 +195,7 @@ class DialogService:
                     timezone=parsed.timezone,
                     publication_type=self._publication_type,
                     target_id=self._target_id,
+                    caption=draft.get(CAPTION_KEY),
                 )
             except PostCreationError as exc:
                 # Нет записи: оставляем дату и черновик для повторной попытки.
