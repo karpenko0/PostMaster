@@ -10,6 +10,7 @@ import contextlib
 import logging
 import signal
 import sys
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 from telebot.async_telebot import AsyncTeleBot
@@ -25,6 +26,7 @@ from postmaster.database.engine import (
     create_database_engine,
     create_session_factory,
 )
+from postmaster.database.health import probe_database
 from postmaster.database.schema import create_schema
 from postmaster.domain.post import PublicationType
 from postmaster.handlers.registry import register_handlers
@@ -38,6 +40,7 @@ from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.cancel_service import CancelService
 from postmaster.services.dialog_service import DialogService
+from postmaster.services.health_service import HealthCheck, HealthReporter
 from postmaster.services.missed_post_handler import MissedPostHandler
 from postmaster.services.my_posts_service import MyPostsService
 from postmaster.services.photo_service import PhotoService
@@ -49,6 +52,11 @@ from postmaster.services.recipient_resolver import (
 from postmaster.services.recovery_service import RecoveryService
 from postmaster.services.scheduler_service import SchedulerService
 from postmaster.services.user_service import UserService
+from postmaster.utils.health import (
+    HealthReportCorrupted,
+    HealthReportStale,
+    read_report,
+)
 from postmaster.utils.logging_config import (
     EVENT_STARTUP,
     EVENT_STARTUP_ERROR,
@@ -83,6 +91,7 @@ class Application:
         engine: AsyncEngine,
         scheduler: SchedulerService,
         transport: Transport,
+        health_reporter: HealthReporter | None = None,
     ) -> None:
         self._bot = bot
         self._engine = engine
@@ -91,6 +100,7 @@ class Application:
         self._closed = False
         self._recovery_service: RecoveryService | None = None
         self._missed_post_handler: MissedPostHandler | None = None
+        self._health_reporter = health_reporter
 
     @property
     def bot(self) -> AsyncTeleBot:
@@ -174,6 +184,13 @@ class Application:
             engine=engine,
             scheduler=scheduler,
             transport=PollingTransport(bot),
+            health_reporter=HealthReporter(
+                health_check=HealthCheck(
+                    database_probe=lambda: probe_database(engine),
+                    scheduler_status=scheduler,
+                ),
+                target=Path(settings.health_file),
+            ),
         )
         instance._recovery_service = recovery_service
         instance._missed_post_handler = missed_post_handler
@@ -195,6 +212,10 @@ class Application:
             report = await self._recovery_service.recover()
             if report.errors:
                 logger.warning("Recovery completed with %s errors", len(report.errors))
+        # Фоновый отчёт health check — после Scheduler и Recovery, чтобы первый
+        # отчёт уже отражал запущенный Scheduler (SPEC-029).
+        if self._health_reporter is not None:
+            await self._health_reporter.start()
 
     async def run(self) -> None:
         """Запускает приложение и работает до вызова stop(). Ресурсы освобождаются всегда."""
@@ -215,6 +236,8 @@ class Application:
         if self._closed:
             return
         self._closed = True
+        if self._health_reporter is not None:
+            await self._health_reporter.stop()
         self._scheduler.shutdown()
         await close_bot_session()
         await self._engine.dispose()
@@ -301,3 +324,108 @@ def main() -> None:
     except KeyboardInterrupt:
         exit_code = EXIT_OK
     raise SystemExit(exit_code)
+
+
+# === Health check CLI (SPEC-029) ============================================
+
+
+EXIT_HEALTHY = 0
+EXIT_UNHEALTHY = 1
+EXIT_HEALTH_CONFIG_ERROR = 2
+
+
+def health_main(argv: list[str] | None = None) -> int:
+    """Точка входа ``python -m postmaster health``.
+
+    Читает JSON-отчёт, который пишет ``HealthReporter`` в фоне работающего
+    приложения. Возвращает:
+
+    - ``0`` — отчёт healthy;
+    - ``1`` — unhealthy / устарел / повреждён / отсутствует;
+    - ``2`` — ошибка конфигурации.
+    """
+    args = _parse_health_args(argv)
+
+    try:
+        settings = load_settings()
+    except Exception as exc:  # noqa: BLE001 — ConfigError или OSError от dotenv
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        return EXIT_HEALTH_CONFIG_ERROR
+
+    target = args.health_file or Path(settings.health_file)
+    max_age = (
+        float(args.max_age_seconds)
+        if args.max_age_seconds is not None
+        else float(settings.health_max_age_seconds)
+    )
+
+    return _check_health_file(target, max_age, args.print_report)
+
+
+def _parse_health_args(argv: list[str] | None) -> "_HealthArgs":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m postmaster health",
+        description="Health check для PostMaster (SPEC-029).",
+    )
+    parser.add_argument(
+        "--health-file",
+        type=Path,
+        default=None,
+        help="Путь к файлу отчёта (по умолчанию из HEALTH_FILE).",
+    )
+    parser.add_argument(
+        "--max-age-seconds",
+        type=float,
+        default=None,
+        help="Максимальный возраст отчёта в секундах (HEALTH_MAX_AGE_SECONDS).",
+    )
+    parser.add_argument(
+        "--print",
+        action="store_true",
+        help="Печатать полный JSON-отчёт вместо краткого summary.",
+    )
+    parsed = parser.parse_args(argv)
+    return _HealthArgs(
+        health_file=parsed.health_file,
+        max_age_seconds=parsed.max_age_seconds,
+        print_report=parsed.print,
+    )
+
+
+class _HealthArgs:
+    __slots__ = ("health_file", "max_age_seconds", "print_report")
+
+    def __init__(self, *, health_file, max_age_seconds, print_report) -> None:
+        self.health_file = health_file
+        self.max_age_seconds = max_age_seconds
+        self.print_report = print_report
+
+
+def _check_health_file(target: Path, max_age_seconds: float, print_report: bool) -> int:
+    """Читает отчёт, печатает (опционально), возвращает код завершения."""
+    try:
+        report = read_report(target, max_age_seconds=max_age_seconds)
+    except HealthReportCorrupted as exc:
+        print(f"unhealthy: corrupted report ({exc})", file=sys.stderr)
+        return EXIT_UNHEALTHY
+    except HealthReportStale as exc:
+        print(f"unhealthy: {exc}", file=sys.stderr)
+        return EXIT_UNHEALTHY
+
+    if report is None:
+        print(
+            f"unhealthy: отчёт не найден ({target}); приложение не запущено или не успело записать",
+            file=sys.stderr,
+        )
+        return EXIT_UNHEALTHY
+
+    if print_report:
+        import json
+
+        print(json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True, indent=2))
+    else:
+        print(report.summary(), file=sys.stderr if not report.healthy else sys.stdout)
+
+    return EXIT_HEALTHY if report.healthy else EXIT_UNHEALTHY

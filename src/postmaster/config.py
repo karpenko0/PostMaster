@@ -17,6 +17,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///data/postmaster.db"
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_TIMEZONE = "Europe/Moscow"
+DEFAULT_HEALTH_FILE = "data/health.json"
+DEFAULT_HEALTH_MAX_AGE_SECONDS = 90
 
 # Формат токена Telegram Bot API: "<числовой id бота>:<секретная часть>".
 _TOKEN_PATTERN = re.compile(r"\d{5,}:[A-Za-z0-9_-]{20,}")
@@ -55,6 +57,16 @@ class Settings(BaseSettings):
     telegram_target_id: str | None = Field(
         default=None,
         description="Канал для режима TELEGRAM (TELEGRAM_TARGET_ID).",
+    )
+    health_file: str = Field(
+        default=DEFAULT_HEALTH_FILE,
+        min_length=1,
+        description="Путь к файлу с отчётом health check (HEALTH_FILE).",
+    )
+    health_max_age_seconds: int = Field(
+        default=DEFAULT_HEALTH_MAX_AGE_SECONDS,
+        gt=0,
+        description="Максимальный возраст отчёта health check в секундах (HEALTH_MAX_AGE_SECONDS).",
     )
 
     @property
