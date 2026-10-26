@@ -23,6 +23,11 @@ from postmaster.publishers.telegram_errors import (
     TelegramErrorMapper,
 )
 from postmaster.publishers.telegram_publisher import TelegramAPIError
+from postmaster.utils.logging_config import (
+    EVENT_PUBLISH_ERROR,
+    EVENT_PUBLISH_REMINDER,
+    log_event,
+)
 from postmaster.utils.timezone_format import format_local_datetime
 
 logger = logging.getLogger(__name__)
@@ -114,31 +119,30 @@ class ReminderPublisher(Publisher):
         external_id = self._extract_message_id(photo_message) or self._extract_message_id(
             text_message
         )
-        logger.info(
-            "Reminder sent post_id=%s user_id=%s message_id=%s",
-            post.id,
-            post.user_id,
-            external_id,
+        log_event(
+            logger,
+            EVENT_PUBLISH_REMINDER,
+            post_id=post.id,
+            user_id=post.user_id,
+            message_id=external_id,
         )
         return PublishResult(post_id=post.id, external_id=external_id)
 
     def _handle_send_error(self, post: Post, exc: Exception, *, what: str) -> None:
         """Преобразует ошибку Telegram API в типизированное исключение (SPEC-021)."""
         error = self._error_mapper.map_exception(exc)
-        if error.code == TelegramErrorCode.BLOCKED:
-            logger.warning(
-                "Telegram reminder blocked post_id=%s user_id=%s",
-                post.id,
-                post.user_id,
-            )
-            raise TelegramBlockedError(error.message) from exc
-        logger.warning(
-            "Telegram reminder API error post_id=%s what=%s code=%s retryable=%s",
-            post.id,
-            what,
-            error.code.value,
-            error.retryable,
+        log_event(
+            logger,
+            EVENT_PUBLISH_ERROR,
+            level=logging.WARNING,
+            post_id=post.id,
+            user_id=post.user_id,
+            what=what,
+            error_code=error.code.value,
+            retryable=error.retryable,
         )
+        if error.code == TelegramErrorCode.BLOCKED:
+            raise TelegramBlockedError(error.message) from exc
         raise TelegramAPIError(error) from exc
 
     @staticmethod

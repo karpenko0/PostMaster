@@ -49,7 +49,12 @@ from postmaster.services.recipient_resolver import (
 from postmaster.services.recovery_service import RecoveryService
 from postmaster.services.scheduler_service import SchedulerService
 from postmaster.services.user_service import UserService
-from postmaster.utils.logging_config import configure_logging
+from postmaster.utils.logging_config import (
+    EVENT_STARTUP,
+    EVENT_STARTUP_ERROR,
+    configure_logging,
+    log_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +201,7 @@ class Application:
         try:
             await self.startup()
             await self._verify_token()
-            logger.info("PostMaster запущен")
+            log_event(logger, EVENT_STARTUP)
             await self._transport.run()
         finally:
             await self.shutdown()
@@ -223,10 +228,18 @@ class Application:
         try:
             me = await self._bot.get_me()
         except ApiTelegramException as exc:
-            if exc.error_code in _TOKEN_REJECTED_CODES:
+            code = exc.error_code
+            log_event(
+                logger,
+                EVENT_STARTUP_ERROR,
+                level=logging.ERROR,
+                error_code=code if code in _TOKEN_REJECTED_CODES else "other",
+            )
+            if code in _TOKEN_REJECTED_CODES:
                 raise StartupError("Telegram отклонил BOT_TOKEN, проверьте его значение") from None
-            raise StartupError(f"Telegram вернул ошибку {exc.error_code}") from None
+            raise StartupError(f"Telegram вернул ошибку {code}") from None
         except Exception:
+            log_event(logger, EVENT_STARTUP_ERROR, level=logging.ERROR, error="network")
             raise StartupError("Telegram API недоступен, проверьте сеть") from None
         logger.info("Бот подключён: @%s", me.username)
 

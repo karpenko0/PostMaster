@@ -16,6 +16,12 @@ from typing import Protocol
 from postmaster.domain.post import Post, PostStatus
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.utils.clock import utc_now
+from postmaster.utils.logging_config import (
+    EVENT_RECOVERY_DONE,
+    EVENT_RECOVERY_ERROR,
+    EVENT_RECOVERY_START,
+    log_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +58,7 @@ class RecoveryService:
             RecoveryReport со статистикой: количество восстановленных задач,
             переданных в missed handler и список ошибок.
         """
-        logger.info("Recovery started")
+        log_event(logger, EVENT_RECOVERY_START)
         posts = await self._repository.list_pending()
         report = RecoveryReport()
         now = utc_now()
@@ -61,18 +67,25 @@ class RecoveryService:
             try:
                 await self._recover_post(post, now)
             except Exception as exc:
-                logger.error("Recovery failed for post_id=%s error=%s", post.id, type(exc).__name__)
+                log_event(
+                    logger,
+                    EVENT_RECOVERY_ERROR,
+                    level=logging.ERROR,
+                    post_id=post.id,
+                    error=type(exc).__name__,
+                )
                 report.errors.append({"post_id": post.id, "error": type(exc).__name__})
                 continue
             if is_overdue:
                 report.missed += 1
             else:
                 report.rescheduled += 1
-        logger.info(
-            "Recovery completed rescheduled=%s missed=%s errors=%s",
-            report.rescheduled,
-            report.missed,
-            len(report.errors),
+        log_event(
+            logger,
+            EVENT_RECOVERY_DONE,
+            rescheduled=report.rescheduled,
+            missed=report.missed,
+            errors=len(report.errors),
         )
         return report
 

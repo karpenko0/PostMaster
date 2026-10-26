@@ -22,6 +22,11 @@ from postmaster.publishers.telegram_errors import (
     TelegramErrorCode,
     TelegramErrorMapper,
 )
+from postmaster.utils.logging_config import (
+    EVENT_PUBLISH_ERROR,
+    EVENT_PUBLISH_TELEGRAM,
+    log_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,11 +120,12 @@ class TelegramChannelPublisher(Publisher):
             self._handle_send_error(post, exc)
 
         external_id = self._extract_message_id(message)
-        logger.info(
-            "Post published via Telegram post_id=%s target=%s message_id=%s",
-            post.id,
-            post.target_id,
-            external_id,
+        log_event(
+            logger,
+            EVENT_PUBLISH_TELEGRAM,
+            post_id=post.id,
+            target=post.target_id,
+            message_id=external_id,
         )
         return PublishResult(post_id=post.id, external_id=external_id)
 
@@ -143,26 +149,19 @@ class TelegramChannelPublisher(Publisher):
         в логи или в ``Post.error_message`` (SPEC-021 §7).
         """
         error = self._error_mapper.map_exception(exc)
+        log_event(
+            logger,
+            EVENT_PUBLISH_ERROR,
+            level=logging.WARNING,
+            post_id=post.id,
+            target=post.target_id,
+            error_code=error.code.value,
+            retryable=error.retryable,
+        )
         if error.code == TelegramErrorCode.PERMISSION:
-            logger.warning(
-                "Telegram permission denied post_id=%s target=%s",
-                post.id,
-                post.target_id,
-            )
             raise TelegramPermissionError(error.message) from exc
         if error.code == TelegramErrorCode.TIMEOUT:
-            logger.warning(
-                "Telegram timeout post_id=%s code=%s",
-                post.id,
-                error.code.value,
-            )
             raise TelegramTimeoutError(error.message) from exc
-        logger.warning(
-            "Telegram API error post_id=%s code=%s retryable=%s",
-            post.id,
-            error.code.value,
-            error.retryable,
-        )
         raise TelegramAPIError(error) from exc
 
     @staticmethod

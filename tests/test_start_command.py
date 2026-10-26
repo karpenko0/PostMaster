@@ -80,7 +80,8 @@ async def test_failed_registration_keeps_data_and_state(
     monkeypatch.setattr(UserRepository, "find_by_telegram_id", unavailable_database)
 
     def error_logged() -> bool:
-        return any("Не удалось зарегистрировать" in r.getMessage() for r in caplog.records)
+        # SPEC-025: структурированное событие command_failed вместо свободного текста.
+        return any("event=command_failed" in r.getMessage() for r in caplog.records)
 
     _send_start(fake_telegram, 42, "ivan", "Иван")
     await wait_until(error_logged)

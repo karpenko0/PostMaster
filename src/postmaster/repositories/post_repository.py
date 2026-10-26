@@ -22,6 +22,16 @@ from postmaster.domain.post import (
     UserNotFoundError,
 )
 from postmaster.utils.clock import utc_now
+from postmaster.utils.logging_config import (
+    EVENT_CLAIM,
+    EVENT_CLAIM_SKIPPED,
+    EVENT_POST_CANCELLED,
+    EVENT_POST_CREATED,
+    EVENT_POST_FAILED,
+    EVENT_PUBLISH_OK,
+    EVENT_STATUS_CHANGED,
+    log_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +118,13 @@ class PostRepository:
             session.add(model)
             await session.flush()
         post = _to_domain(model)
-        logger.info("Post created id=%s user_id=%s status=PENDING", post.id, post.user_id)
+        log_event(
+            logger,
+            EVENT_POST_CREATED,
+            post_id=post.id,
+            user_id=post.user_id,
+            status="PENDING",
+        )
         return post
 
     async def get_by_id(self, post_id: int) -> Post | None:
@@ -166,13 +182,19 @@ class PostRepository:
                 .values(status=PostStatus.PROCESSING.value, updated_at=stamp)
             )
             if result.rowcount != 1:
-                logger.info("Post claim skipped id=%s: status changed concurrently", post_id)
+                log_event(
+                    logger,
+                    EVENT_CLAIM_SKIPPED,
+                    level=logging.INFO,
+                    post_id=post_id,
+                    reason="status_changed",
+                )
                 return None
             model = await session.get(PostModel, post_id)
             if model is None:
                 return None
             post = _to_domain(model)
-        logger.info("Post claimed id=%s status=PROCESSING", post_id)
+        log_event(logger, EVENT_CLAIM, post_id=post_id, status="PROCESSING")
         return post
 
     async def update_status(
@@ -218,11 +240,17 @@ class PostRepository:
             await session.refresh(model)
             post = _to_domain(model)
         if target == PostStatus.FAILED:
-            logger.error("Post failed id=%s", post_id)
+            log_event(logger, EVENT_POST_FAILED, level=logging.ERROR, post_id=post_id)
         elif target == PostStatus.PUBLISHED:
-            logger.info("Post published id=%s", post_id)
+            log_event(logger, EVENT_PUBLISH_OK, post_id=post_id)
         else:
-            logger.info("Post status changed id=%s %s->%s", post_id, old, target)
+            log_event(
+                logger,
+                EVENT_STATUS_CHANGED,
+                post_id=post_id,
+                old=old.value,
+                new=target.value,
+            )
         return post
 
     async def cancel_post(self, post_id: int, user_id: int, *, now: datetime | None = None) -> bool:
@@ -239,6 +267,13 @@ class PostRepository:
                 .values(status=PostStatus.CANCELLED.value, updated_at=stamp)
             )
         if result.rowcount == 1:
-            logger.info("Post status changed id=%s PENDING->CANCELLED", post_id)
+            log_event(
+                logger,
+                EVENT_POST_CANCELLED,
+                post_id=post_id,
+                user_id=user_id,
+                old="PENDING",
+                new="CANCELLED",
+            )
             return True
         return False

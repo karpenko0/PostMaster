@@ -33,6 +33,14 @@ from postmaster.publishers.telegram_publisher import (
 )
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.utils.clock import utc_now
+from postmaster.utils.logging_config import (
+    EVENT_PUBLICATION_ATTEMPT_FAILED,
+    EVENT_PUBLICATION_FAILED,
+    EVENT_PUBLICATION_OK,
+    EVENT_PUBLICATION_START,
+    EVENT_RETRY,
+    log_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +162,7 @@ class PublicationService:
         получает право на вызов Publisher. Конкурирующие вызовы получают право
         ровно один раз: один делает claim, остальные получают PostClaimLostError.
         """
-        logger.info("Publication started post_id=%s", post_id)
+        log_event(logger, EVENT_PUBLICATION_START, post_id=post_id)
 
         # Проверяем существование поста, чтобы отличить «нет записи» от «не PENDING».
         existing = await self._repository.get_by_id(post_id)
@@ -184,20 +192,38 @@ class PublicationService:
             except Exception as exc:
                 error_message = self._build_error_message(exc)
                 retryable = self._is_retryable(exc)
+                error_code = self._error_code(exc)
                 last_error = exc
-                logger.warning(
-                    "Publication attempt failed post_id=%s attempt=%s error=%s retryable=%s",
-                    post_id,
-                    attempt,
-                    type(exc).__name__,
-                    retryable,
+                log_event(
+                    logger,
+                    EVENT_PUBLICATION_ATTEMPT_FAILED,
+                    level=logging.WARNING,
+                    post_id=post_id,
+                    attempt=attempt,
+                    error=type(exc).__name__,
+                    error_code=error_code,
+                    retryable=retryable,
                 )
                 if retryable and self._retry_policy.should_retry(attempt):
                     # Возвращаем в PENDING для повторной попытки.
                     try:
                         await self._repository.update_status(post_id, PostStatus.PENDING)
                     except Exception:
-                        logger.warning("Failed to reset post to PENDING post_id=%s", post_id)
+                        log_event(
+                            logger,
+                            "publication_reset_failed",
+                            level=logging.WARNING,
+                            post_id=post_id,
+                            error="reset_to_pending_failed",
+                        )
+                    log_event(
+                        logger,
+                        EVENT_RETRY,
+                        post_id=post_id,
+                        attempt=attempt,
+                        next_attempt=attempt + 1,
+                        delay_seconds=self._retry_policy.delay_after_attempt(attempt),
+                    )
                     # SPEC-022 §4: ждём delays[attempt-1] секунд перед повтором
                     # (+30s → +2m → +10m).
                     await asyncio.sleep(self._retry_policy.delay_after_attempt(attempt))
@@ -209,10 +235,14 @@ class PublicationService:
                     continue
                 # Попытки исчерпаны или ошибка не повторяемая.
                 await self._mark_failed(post_id, error_message)
-                logger.error(
-                    "Publication failed after %s attempts post_id=%s",
-                    attempt,
-                    post_id,
+                log_event(
+                    logger,
+                    EVENT_PUBLICATION_FAILED,
+                    level=logging.ERROR,
+                    post_id=post_id,
+                    attempts=attempt,
+                    error=type(exc).__name__,
+                    error_code=error_code,
                 )
                 raise PublicationError(post_id, error_message) from exc
 
@@ -220,7 +250,12 @@ class PublicationService:
             published = await self._repository.update_status(
                 post_id, PostStatus.PUBLISHED, published_at=utc_now()
             )
-            logger.info("Publication completed post_id=%s attempt=%s", post_id, attempt)
+            log_event(
+                logger,
+                EVENT_PUBLICATION_OK,
+                post_id=post_id,
+                attempt=attempt,
+            )
             return published
 
         # Сюда не должны дойти, но на всякий случай.
@@ -234,4 +269,15 @@ class PublicationService:
                 post_id, PostStatus.FAILED, error_message=error_message
             )
         except Exception:
-            logger.warning("Failed to mark post as FAILED post_id=%s", post_id)
+            log_event(
+                logger,
+                "mark_failed_error",
+                level=logging.WARNING,
+                post_id=post_id,
+            )
+
+    def _error_code(self, exc: Exception) -> str:
+        """Извлекает error_code из исключения для структурированного лога."""
+        if isinstance(exc, TelegramAPIError):
+            return exc.error.code.value
+        return type(exc).__name__

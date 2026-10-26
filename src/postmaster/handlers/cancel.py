@@ -18,6 +18,11 @@ from telebot.types import Message
 
 from postmaster.services.cancel_service import CancelService, PostNotFoundForUserError
 from postmaster.services.user_service import UserService
+from postmaster.utils.logging_config import (
+    EVENT_COMMAND_CANCEL,
+    EVENT_COMMAND_FAILED,
+    log_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +67,22 @@ def register_cancel_handler(
             await bot.send_message(message.chat.id, CANCEL_NOT_FOUND)
             return
         except Exception:
+            log_event(
+                logger,
+                EVENT_COMMAND_FAILED,
+                level=logging.ERROR,
+                command="cancel",
+                post_id=post_id,
+                telegram_user_id=sender.id,
+            )
             logger.exception("Cancel failed post_id=%s telegram_user_id=%s", post_id, sender.id)
             await bot.send_message(message.chat.id, CANCEL_FAILED)
             return
+        log_event(
+            logger,
+            EVENT_COMMAND_CANCEL,
+            command="cancel",
+            post_id=post_id,
+            telegram_user_id=sender.id,
+        )
         await bot.send_message(message.chat.id, CANCEL_OK.format(post_id=post_id))

@@ -15,6 +15,11 @@ from telebot.async_telebot import AsyncTeleBot
 from telebot.types import Message
 
 from postmaster.services.my_posts_service import MyPostsService
+from postmaster.utils.logging_config import (
+    EVENT_COMMAND_FAILED,
+    EVENT_COMMAND_MY_POSTS,
+    log_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +40,23 @@ def register_my_posts_handler(
         try:
             text = await my_posts_service.render_list(sender.id)
         except Exception:
+            log_event(
+                logger,
+                EVENT_COMMAND_FAILED,
+                level=logging.ERROR,
+                command="my_posts",
+                telegram_user_id=sender.id,
+            )
             logger.exception(
                 "my_posts failed telegram_user_id=%s",
                 sender.id,
             )
             await bot.send_message(message.chat.id, MY_POSTS_FAILED)
             return
+        log_event(
+            logger,
+            EVENT_COMMAND_MY_POSTS,
+            command="my_posts",
+            telegram_user_id=sender.id,
+        )
         await bot.send_message(message.chat.id, text)

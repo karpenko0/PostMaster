@@ -13,6 +13,13 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from postmaster.domain.post import PostNotFoundError, PostStatus
 from postmaster.repositories.post_repository import PostRepository
+from postmaster.utils.logging_config import (
+    EVENT_SCHEDULER_JOB_ADDED,
+    EVENT_SCHEDULER_JOB_REMOVED,
+    EVENT_SCHEDULER_START,
+    EVENT_SCHEDULER_STOP,
+    log_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +63,12 @@ class SchedulerService:
             id=f"post:{post_id}",
             replace_existing=True,
         )
+        log_event(
+            logger,
+            EVENT_SCHEDULER_JOB_ADDED,
+            post_id=post_id,
+            run_at=run_at.astimezone(UTC).isoformat(),
+        )
 
     def remove_job(self, post_id: int) -> bool:
         """Удаляет задание поста из Scheduler. Возвращает True, если задание было.
@@ -72,7 +85,12 @@ class SchedulerService:
             logger.exception("Не удалось удалить задание Scheduler post_id=%s", post_id)
             return False
         if removed:
-            logger.info("Scheduler job removed post_id=%s", post_id)
+            log_event(
+                logger,
+                EVENT_SCHEDULER_JOB_REMOVED,
+                level=logging.INFO,
+                post_id=post_id,
+            )
         return removed
 
     async def _on_post_due(self, post_id: int) -> None:
@@ -102,11 +120,11 @@ class SchedulerService:
     def start(self) -> None:
         """Запускает Scheduler. Вызывать из работающего event loop."""
         self._scheduler.start()
-        logger.info("Scheduler запущен")
+        log_event(logger, EVENT_SCHEDULER_START)
 
     def shutdown(self) -> None:
         """Останавливает Scheduler, если он запущен. Повторный вызов безопасен."""
         if not self.running:
             return
         self._scheduler.shutdown(wait=False)
-        logger.info("Scheduler остановлен")
+        log_event(logger, EVENT_SCHEDULER_STOP)

@@ -6,8 +6,14 @@ Handler отправляет пользователю справку о кома
 Текст справки описывает только существующие функции (BR-019-01).
 """
 
+import logging
+
 from telebot.async_telebot import AsyncTeleBot
 from telebot.types import Message
+
+from postmaster.utils.logging_config import EVENT_COMMAND_HELP, log_event
+
+logger = logging.getLogger(__name__)
 
 # Текст справки (BR-019-01: описывает только существующие команды).
 HELP_TEXT = (
@@ -37,4 +43,12 @@ def register_help_handler(bot: AsyncTeleBot) -> None:
 
     @bot.message_handler(commands=["help"], chat_types=["private"])
     async def handle_help(message: Message) -> None:
+        sender = message.from_user
+        telegram_user_id = sender.id if sender is not None else None
+        log_event(
+            logger,
+            EVENT_COMMAND_HELP,
+            command="help",
+            telegram_user_id=telegram_user_id,
+        )
         await bot.send_message(message.chat.id, HELP_TEXT)
