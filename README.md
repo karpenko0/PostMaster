@@ -36,6 +36,7 @@ cp .env.example .env
 | `TELEGRAM_TARGET_ID` | для `POST_MODE=TELEGRAM` | — | ID канала назначения, например `-1001234567890` |
 | `HEALTH_FILE` | нет | `data/health.json` | Путь к JSON-отчёту health check (SPEC-029) |
 | `HEALTH_MAX_AGE_SECONDS` | нет | `90` | Максимальный возраст отчёта, после которого он считается устаревшим |
+| `BACKUP_PATH` | нет | `data/backup.db` | Путь к файлу резервной копии SQLite (SPEC-030) |
 
 Переменные окружения имеют приоритет над файлом `.env`. Файл `.env` не попадает в Git и в образ Docker.
 
@@ -157,6 +158,24 @@ python -m postmaster health --max-age-seconds 60
 (``SchedulerService.running``). Отчёт атомарно пишется в `HEALTH_FILE`
 каждые 30 секунд; не содержит секретов, паролей БД и пользовательских
 данных.
+
+## Резервное копирование SQLite (SPEC-030)
+
+```bash
+python -m postmaster backup
+# код 0 → backup создан и проверен
+# код 1 → ошибка backup
+# код 2 → ошибка конфигурации
+
+# С флагами:
+python -m postmaster backup --source /path/to/db.sqlite
+python -m postmaster backup --destination /var/backups/postmaster.db
+```
+
+Создаёт резервную копию SQLite через Online Backup API и проверяет её
+целостность (`PRAGMA integrity_check`). Активная БД не меняется,
+`.env` не включается (это файл SQLite, секреты хранятся отдельно).
+Поддерживается только для `DATABASE_URL` с SQLite.
 
 ## Архитектура
 

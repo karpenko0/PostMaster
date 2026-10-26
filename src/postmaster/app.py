@@ -12,6 +12,8 @@ import signal
 import sys
 from pathlib import Path
 
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from telebot.async_telebot import AsyncTeleBot
 from telebot.asyncio_helper import ApiTelegramException
@@ -21,6 +23,7 @@ from postmaster.bot.factory import close_bot_session, create_bot
 from postmaster.bot.sender import BotTelegramReminderSender, BotTelegramSender
 from postmaster.bot.transport import PollingTransport, Transport
 from postmaster.config import ConfigError, Settings, load_settings
+from postmaster.database.backup import BackupError, create_backup
 from postmaster.database.engine import (
     check_database,
     create_database_engine,
@@ -332,6 +335,96 @@ def main() -> None:
 EXIT_HEALTHY = 0
 EXIT_UNHEALTHY = 1
 EXIT_HEALTH_CONFIG_ERROR = 2
+
+
+def backup_main(argv: list[str] | None = None) -> int:
+    """Точка входа ``python -m postmaster backup``.
+
+    Создаёт резервную копию SQLite и проверяет её читаемость (SPEC-030).
+
+    Возвращает:
+    - ``0`` — backup создан и проверен;
+    - ``1`` — backup не создан или проверка не пройдена;
+    - ``2`` — ошибка конфигурации.
+    """
+    args = _parse_backup_args(argv)
+
+    try:
+        settings = load_settings()
+    except Exception as exc:  # noqa: BLE001 — ConfigError или OSError от dotenv
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        return EXIT_HEALTH_CONFIG_ERROR
+
+    source = args.source or _database_file_path(settings.database_url)
+    if source is None:
+        print(
+            "Резервное копирование поддерживается только для SQLite (DATABASE_URL)",
+            file=sys.stderr,
+        )
+        return EXIT_UNHEALTHY
+
+    destination = args.destination or Path(settings.backup_path)
+
+    try:
+        report = create_backup(source, destination)
+    except BackupError as exc:
+        print(f"Ошибка backup: {exc}", file=sys.stderr)
+        return EXIT_UNHEALTHY
+
+    print(f"backup создан: {report.destination}")
+    print(f"проверка целостности: {report.integrity}")
+    print(f"строк: {report.row_counts}")
+    print(f"длительность: {report.duration_seconds:.3f}s")
+    return EXIT_HEALTHY
+
+
+def _parse_backup_args(argv: list[str] | None) -> "_BackupArgs":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m postmaster backup",
+        description="Резервное копирование SQLite (SPEC-030).",
+    )
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=None,
+        help="Путь к файлу SQLite (по умолчанию из DATABASE_URL).",
+    )
+    parser.add_argument(
+        "--destination",
+        type=Path,
+        default=None,
+        help="Путь к файлу backup (по умолчанию из BACKUP_PATH).",
+    )
+    parsed = parser.parse_args(argv)
+    return _BackupArgs(source=parsed.source, destination=parsed.destination)
+
+
+class _BackupArgs:
+    __slots__ = ("source", "destination")
+
+    def __init__(self, *, source, destination) -> None:
+        self.source = source
+        self.destination = destination
+
+
+def _database_file_path(database_url: str) -> Path | None:
+    """Возвращает путь к файлу SQLite по строке подключения.
+
+    Для не-SQLite баз (PostgreSQL и др.) возвращает None: online backup
+    реализован через sqlite3 и к PostgreSQL неприменим.
+    """
+    try:
+        url = make_url(database_url)
+    except ArgumentError:
+        return None
+    if url.get_backend_name() != "sqlite":
+        return None
+    database = url.database
+    if not database or database == ":memory:" or database.startswith("file:"):
+        return None
+    return Path(database)
 
 
 def health_main(argv: list[str] | None = None) -> int:
