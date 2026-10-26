@@ -94,6 +94,17 @@ class Settings(BaseSettings):
             raise ValueError("не задан или имеет неверный формат")
         return value
 
+    @field_validator("database_url")
+    @classmethod
+    def _check_database_url(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("пустое значение")
+        # Синтаксис SQLAlchemy URL проверяется в слое database при создании
+        # движка — здесь только непустота, чтобы не нарушать архитектурное
+        # правило «config не импортирует sqlalchemy» (test_architecture).
+        return stripped
+
     @field_validator("default_timezone")
     @classmethod
     def _check_timezone(cls, value: str) -> str:
