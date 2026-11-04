@@ -1,283 +1,197 @@
-"""PublicationService: выполнение публикации через Publisher (SPEC-010, SPEC-013, SPEC-016).
+"""PublicationService: идемпотентное выполнение публикации с atomic claim (SPEC-013…016).
 
-Сервис координирует процесс публикации:
-1. Атомарно забирает пост в работу: PENDING -> PROCESSING (claim_for_processing).
-   Только rowcount=1 даёт право вызвать Publisher.
-2. Резолвит Publisher по типу публикации через PublisherResolver (SPEC-016).
-3. Вызывает Publisher.publish(post).
-4. При успехе переводит PROCESSING -> PUBLISHED с временной меткой.
-5. При ошибке переводит PROCESSING -> FAILED с сообщением об ошибке.
-6. При наличии retry_policy и оставшихся попыток переводит PROCESSING -> PENDING
-   для повторной попытки.
-
-Сервис работает только с абстракцией Publisher (BR-03) и не импортирует telebot.
+Любой источник запуска (Scheduler, Recovery, Missed Job) вызывает PublicationService.execute,
+не переводя Post в PROCESSING самостоятельно (§19). Право на вызов Publisher получает только
+обработчик, чей условный UPDATE перевёл запись из PENDING в PROCESSING (BR-013-01…10).
+Выбор конкретной реализации Publisher выполняется через PublisherResolver (SPEC-016 §13–16).
 """
 
-import asyncio
 import logging
+from collections.abc import Callable, Mapping
+from datetime import datetime
+from typing import Any
 
 from postmaster.domain.post import (
     Post,
-    PostNotFoundError,
-    PostStatus,
+    PublicationErrorCode,
+    PublicationType,
+    TemporaryPublicationError,
 )
-from postmaster.publishers.resolver import (
-    PublisherNotConfiguredError,
-    PublisherResolver,
-    UnknownPublicationTypeError,
-)
-from postmaster.publishers.telegram_errors import TelegramErrorMapper
-from postmaster.publishers.telegram_publisher import (
-    TelegramAPIError,
-    TelegramTimeoutError,
-)
+from postmaster.publishers.base import Publisher, PublishResult
+from postmaster.publishers.resolver import PublisherNotFoundError, PublisherResolver
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.utils.clock import utc_now
-from postmaster.utils.logging_config import (
-    EVENT_PUBLICATION_ATTEMPT_FAILED,
-    EVENT_PUBLICATION_FAILED,
-    EVENT_PUBLICATION_OK,
-    EVENT_PUBLICATION_START,
-    EVENT_RETRY,
-    log_event,
-)
 
 logger = logging.getLogger(__name__)
 
 
-# Типы, которые считаются retryable по умолчанию (без error_mapper, SPEC-022 §1):
-# сетевые и временные ошибки Telegram API, а также их типизированные обёртки.
-_DEFAULT_RETRYABLE: tuple[type[BaseException], ...] = (
-    TimeoutError,
-    ConnectionError,
-    TelegramTimeoutError,
-)
+class PublishResultError(Exception):
+    """Обёртка над неуспешным PublishResult для передачи в предикат retry-политики."""
 
-
-class PublicationError(Exception):
-    """Ошибка публикации. Содержит post_id для диагностики."""
-
-    def __init__(self, post_id: int, message: str) -> None:
-        self.post_id = post_id
-        super().__init__(message)
-
-
-class PostNotPendingError(PublicationError):
-    """Пост не в статусе PENDING — нельзя начать публикацию."""
-
-
-class PostClaimLostError(PublicationError):
-    """Другой исполнитель уже забрал пост (claim вернул None)."""
-
-
-class RetryPolicy:
-    """Политика повторных попыток при ошибке публикации (SPEC-022 §1, §4).
-
-    По умолчанию выполняется три повтора с задержками +30s, +2m, +10m. После
-    четвёртой неудачной попытки пост переходит в FAILED.
-
-    delays[i] — задержка в секундах перед повтором после неудачной попытки i+1.
-    Количество попыток суммарно равно 1 + len(delays).
-    """
-
-    #: Задержки перед повторами: +30s, +2m, +10m (SPEC-022 §4).
-    DEFAULT_DELAYS: tuple[int, ...] = (30, 120, 600)
-
-    def __init__(self, delays: tuple[int, ...] = DEFAULT_DELAYS) -> None:
-        if any(delay < 0 for delay in delays):
-            raise ValueError("задержка должна быть >= 0")
-        self.delays = delays
-
-    @property
-    def max_attempts(self) -> int:
-        """Суммарное число попыток: первая плюс повторы. Пустые delays → одна попытка."""
-        return 1 + len(self.delays)
-
-    def should_retry(self, attempt: int) -> bool:
-        """Нужно ли повторять попытку. attempt — номер текущей попытки (1-based)."""
-        return 1 <= attempt <= len(self.delays)
-
-    def delay_after_attempt(self, attempt: int) -> int:
-        """Задержка в секундах после неудачной попытки с номером attempt (1-based).
-
-        attempt=1 → +30s, attempt=2 → +2m, attempt=3 → +10m.
-        """
-        if not self.should_retry(attempt):
-            raise ValueError(f"нет задержки для попытки {attempt}")
-        return self.delays[attempt - 1]
+    def __init__(self, result: PublishResult) -> None:
+        self.result = result
+        self.error_code = result.error_code
+        self.error_message = result.error_message
+        self.retryable = result.retryable
+        self.is_temporary = result.retryable
+        super().__init__(result.error_message or result.error_code or "Publication failed")
 
 
 class PublicationService:
-    """Запускает публикацию поста и обновляет его статус."""
+    """Запуск публикации поста и атомарное обновление его статуса (SPEC-013…016)."""
 
     def __init__(
         self,
-        repository: PostRepository,
-        publisher_resolver: PublisherResolver,
-        retry_policy: RetryPolicy | None = None,
-        error_mapper: TelegramErrorMapper | None = None,
+        post_repository: PostRepository | None = None,
+        publisher: Publisher
+        | PublisherResolver
+        | Mapping[PublicationType | str, Publisher]
+        | None = None,
+        *,
+        publisher_resolver: PublisherResolver | None = None,
+        publishers: Mapping[PublicationType | str, Publisher] | None = None,
+        is_temporary_error: Callable[[BaseException], bool] | None = None,
+        now_fn: Callable[[], datetime] = utc_now,
     ) -> None:
-        self._repository = repository
-        self._publishers = publisher_resolver
-        # SPEC-022: если retry_policy не передан, повторы отключены — одна попытка.
-        self._retry_policy = retry_policy or RetryPolicy(delays=())
-        # Если передан маппер, он управляет retry-решением через флаг retryable
-        # (SPEC-021 §3). Без маппера сервис использует простую эвристику:
-        # TimeoutError/ConnectionError — повторяемые, всё остальное — нет.
-        self._error_mapper = error_mapper
+        self._repository = post_repository
+        self._default_publisher: Publisher | None = None
+        self._resolver: PublisherResolver | None = publisher_resolver
 
-    def _is_retryable(self, exc: Exception) -> bool:
-        """True, если ошибку нужно повторить (SPEC-022 §1).
+        if isinstance(publisher, PublisherResolver):
+            self._resolver = publisher
+        elif isinstance(publisher, Mapping):
+            if self._resolver is None:
+                self._resolver = PublisherResolver(publishers=publisher)
+            else:
+                for key, value in publisher.items():
+                    self._resolver.register(key, value)
+        elif publisher is not None:
+            self._default_publisher = publisher
 
-        При наличии error_mapper используется его классификация (TIMEOUT/NETWORK/
-        UNAVAILABLE — retryable). Без маппера повторяемы только TimeoutError и
-        ConnectionError (см. _DEFAULT_RETRYABLE). Чтобы типизированные исключения
-        Publisher (TelegramTimeoutError и т. п.) корректно опознавались, решение
-        принимается по оригинальному исключению из ``__cause__``.
-        """
-        if self._error_mapper is not None:
-            return self._error_mapper.map_exception(exc).retryable
-        cause = exc.__cause__
-        candidates = (exc, cause) if isinstance(cause, BaseException) else (exc,)
-        return any(isinstance(c, _DEFAULT_RETRYABLE) for c in candidates)
+        if publishers is not None:
+            if self._resolver is None:
+                self._resolver = PublisherResolver(publishers=publishers)
+            else:
+                for key, value in publishers.items():
+                    self._resolver.register(key, value)
 
-    def _build_error_message(self, exc: Exception) -> str:
-        """Готовит безопасный текст ошибки для лога и Post.error_message.
+        self._is_temporary_error = is_temporary_error
+        self._now_fn = now_fn
 
-        TelegramAPIError уже несёт нормализованное сообщение (SPEC-021 §7).
-        Для прочих исключений текст обрезается до 500 символов и заменяется на
-        имя типа, если строка пустая.
-        """
-        if isinstance(exc, TelegramAPIError):
-            return exc.error.message
-        raw = str(exc).strip()
-        if not raw:
-            return type(exc).__name__
-        return raw[:500]
+    @property
+    def publisher_resolver(self) -> PublisherResolver | None:
+        """Возвращает подключённый PublisherResolver (SPEC-016 §13, §16)."""
+        return self._resolver
 
-    async def publish(self, post_id: int) -> Post:
-        """Выполняет публикацию поста с атомарным claim, выполнением и финальным переходом.
+    async def execute(self, post_id: int) -> bool:
+        """Атомарно захватывает PENDING-пост, выбирает Publisher, публикует и меняет статус."""
+        if self._repository is None:
+            raise RuntimeError("PublicationService требует PostRepository")
 
-        SPEC-013 §1: атомарный claim — единственный момент, когда исполнитель
-        получает право на вызов Publisher. Конкурирующие вызовы получают право
-        ровно один раз: один делает claim, остальные получают PostClaimLostError.
-        """
-        log_event(logger, EVENT_PUBLICATION_START, post_id=post_id)
+        claimed = await self._repository.claim_post_for_processing(post_id, now=self._now_fn())
+        if not claimed:
+            return False
 
-        # Проверяем существование поста, чтобы отличить «нет записи» от «не PENDING».
-        existing = await self._repository.get_by_id(post_id)
-        if existing is None:
-            raise PostNotFoundError(f"публикация {post_id} не найдена")
-
-        # Атомарный claim (SPEC-013 §1, §4): только rowcount=1 даёт право на execution.
-        # Одновременные вызовы: один получает claim, остальные — PostClaimLostError.
-        claimed = await self._repository.claim_for_processing(post_id)
-        if claimed is None:
-            # Другой исполнитель уже забрал пост или он отменён.
-            raise PostClaimLostError(post_id, "другой исполнитель уже забрал пост")
-
-        # С этого момента исполнитель имеет право на вызов Publisher.
-        try:
-            publisher = self._publishers.resolve(claimed.publication_type)
-        except (PublisherNotConfiguredError, UnknownPublicationTypeError) as exc:
-            # SPEC-016: неизвестный тип или ненастроенный publisher — пост не публикуется,
-            # переходим в FAILED с информативным сообщением.
-            await self._mark_failed(post_id, str(exc))
-            raise PublicationError(post_id, str(exc)) from exc
-
-        last_error: Exception | None = None
-        for attempt in range(1, self._retry_policy.max_attempts + 1):
-            try:
-                await publisher.publish(claimed)
-            except Exception as exc:
-                error_message = self._build_error_message(exc)
-                retryable = self._is_retryable(exc)
-                error_code = self._error_code(exc)
-                last_error = exc
-                log_event(
-                    logger,
-                    EVENT_PUBLICATION_ATTEMPT_FAILED,
-                    level=logging.WARNING,
-                    post_id=post_id,
-                    attempt=attempt,
-                    error=type(exc).__name__,
-                    error_code=error_code,
-                    retryable=retryable,
-                )
-                if retryable and self._retry_policy.should_retry(attempt):
-                    # Возвращаем в PENDING для повторной попытки.
-                    try:
-                        await self._repository.update_status(post_id, PostStatus.PENDING)
-                    except Exception:
-                        log_event(
-                            logger,
-                            "publication_reset_failed",
-                            level=logging.WARNING,
-                            post_id=post_id,
-                            error="reset_to_pending_failed",
-                        )
-                    log_event(
-                        logger,
-                        EVENT_RETRY,
-                        post_id=post_id,
-                        attempt=attempt,
-                        next_attempt=attempt + 1,
-                        delay_seconds=self._retry_policy.delay_after_attempt(attempt),
-                    )
-                    # SPEC-022 §4: ждём delays[attempt-1] секунд перед повтором
-                    # (+30s → +2m → +10m).
-                    await asyncio.sleep(self._retry_policy.delay_after_attempt(attempt))
-                    # Повторный claim перед следующей попыткой.
-                    reclaimed = await self._repository.claim_for_processing(post_id)
-                    if reclaimed is None:
-                        raise PostClaimLostError(post_id, "потерян claim во время retry") from None
-                    claimed = reclaimed
-                    continue
-                # Попытки исчерпаны или ошибка не повторяемая.
-                await self._mark_failed(post_id, error_message)
-                log_event(
-                    logger,
-                    EVENT_PUBLICATION_FAILED,
-                    level=logging.ERROR,
-                    post_id=post_id,
-                    attempts=attempt,
-                    error=type(exc).__name__,
-                    error_code=error_code,
-                )
-                raise PublicationError(post_id, error_message) from exc
-
-            # Успех.
-            published = await self._repository.update_status(
-                post_id, PostStatus.PUBLISHED, published_at=utc_now()
+        post = await self._repository.get_by_id(post_id)
+        if post is None:
+            logger.error(
+                "Post not found after claim post_id=%s code=%s",
+                post_id,
+                PublicationErrorCode.POST_NOT_FOUND_AFTER_CLAIM.value,
             )
-            log_event(
-                logger,
-                EVENT_PUBLICATION_OK,
-                post_id=post_id,
-                attempt=attempt,
-            )
-            return published
+            return False
 
-        # Сюда не должны дойти, но на всякий случай.
-        if last_error is not None:
-            raise PublicationError(post_id, str(last_error)) from last_error
-        raise PublicationError(post_id, "неизвестная ошибка публикации")
-
-    async def _mark_failed(self, post_id: int, error_message: str) -> None:
         try:
-            await self._repository.update_status(
-                post_id, PostStatus.FAILED, error_message=error_message
+            publisher = self._resolve_publisher(post)
+            result = await publisher.publish(post)
+        except Exception as exc:
+            await self._handle_publish_error(post_id, exc)
+            return False
+
+        if isinstance(result, PublishResult) and not result.success:
+            await self._handle_publish_error(post_id, PublishResultError(result))
+            return False
+
+        published_at = self._now_fn()
+        try:
+            updated = await self._repository.mark_published(
+                post_id, published_at=published_at, now=published_at
             )
         except Exception:
-            log_event(
-                logger,
-                "mark_failed_error",
-                level=logging.WARNING,
-                post_id=post_id,
+            logger.error(
+                "Final status update failed post_id=%s code=%s",
+                post_id,
+                PublicationErrorCode.FINAL_STATUS_UPDATE_FAILED.value,
             )
+            return False
+        if not updated:
+            logger.error(
+                "Final status update failed post_id=%s code=%s",
+                post_id,
+                PublicationErrorCode.FINAL_STATUS_UPDATE_FAILED.value,
+            )
+            return False
+        return True
 
-    def _error_code(self, exc: Exception) -> str:
-        """Извлекает error_code из исключения для структурированного лога."""
-        if isinstance(exc, TelegramAPIError):
-            return exc.error.code.value
-        return type(exc).__name__
+    execute_post = execute
+
+    def _resolve_publisher(self, post: Post | Any) -> Publisher:
+        publication_type = getattr(post, "publication_type", None)
+        post_id = getattr(post, "id", None)
+        if self._resolver is not None:
+            try:
+                return self._resolver.resolve(publication_type, post_id=post_id)
+            except PublisherNotFoundError:
+                if self._default_publisher is not None:
+                    return self._default_publisher
+                raise
+        if self._default_publisher is not None:
+            return self._default_publisher
+        raise PublisherNotFoundError(publication_type)
+
+    def _is_temporary(self, exc: BaseException) -> bool:
+        if self._is_temporary_error is not None:
+            return bool(self._is_temporary_error(exc))
+        if isinstance(exc, TemporaryPublicationError):
+            return True
+        return bool(getattr(exc, "is_temporary", False) or getattr(exc, "retryable", False))
+
+    async def _handle_publish_error(self, post_id: int, exc: BaseException) -> None:
+        assert self._repository is not None
+        message = str(exc).strip() or type(exc).__name__
+        now = self._now_fn()
+        if self._is_temporary(exc):
+            try:
+                updated = await self._repository.release_post_for_retry(
+                    post_id, error_message=message, now=now
+                )
+            except Exception:
+                logger.error(
+                    "Final status update failed post_id=%s code=%s",
+                    post_id,
+                    PublicationErrorCode.FINAL_STATUS_UPDATE_FAILED.value,
+                )
+                return
+            if not updated:
+                logger.error(
+                    "Final status update failed post_id=%s code=%s",
+                    post_id,
+                    PublicationErrorCode.FINAL_STATUS_UPDATE_FAILED.value,
+                )
+            return
+
+        try:
+            updated = await self._repository.mark_failed(post_id, error_message=message, now=now)
+        except Exception:
+            logger.error(
+                "Final status update failed post_id=%s code=%s",
+                post_id,
+                PublicationErrorCode.FINAL_STATUS_UPDATE_FAILED.value,
+            )
+            return
+        if not updated:
+            logger.error(
+                "Final status update failed post_id=%s code=%s",
+                post_id,
+                PublicationErrorCode.FINAL_STATUS_UPDATE_FAILED.value,
+            )

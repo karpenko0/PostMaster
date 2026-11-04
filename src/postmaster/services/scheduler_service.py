@@ -1,8 +1,8 @@
-"""Обёртка над APScheduler (SPEC-010).
+"""Обёртка над APScheduler (SPEC-010, SPEC-013).
 
-Scheduler работает в event loop приложения. Его задания вызывают PublicationService,
-а не Telegram API напрямую (BR-04). SPEC-009 регистрирует задания по post_id;
-при срабатывании задания PublicationService выполняет публикацию.
+Scheduler работает в event loop приложения. Его задания вызывают прикладные сервисы,
+а не Telegram API напрямую (BR-04). При подключённом PublicationService выполнение
+делегируется в publication_service.execute(post_id) с защитой через atomic claim (SPEC-013 §19).
 """
 
 import logging
@@ -24,10 +24,8 @@ from postmaster.utils.logging_config import (
 logger = logging.getLogger(__name__)
 
 
-class PublicationExecutor(Protocol):
-    """Порт выполнения публикации. Реализация — PublicationService."""
-
-    async def publish(self, post_id: int): ...
+class PostExecutionService(Protocol):
+    async def execute(self, post_id: int) -> object: ...
 
 
 class SchedulerService:
@@ -36,23 +34,19 @@ class SchedulerService:
     def __init__(
         self,
         post_repository: PostRepository | None = None,
-        publication_executor: PublicationExecutor | None = None,
+        publication_service: PostExecutionService | None = None,
     ) -> None:
         # Все времена в БД хранятся в UTC (SPEC-006), поэтому Scheduler работает в UTC.
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         self._posts = post_repository
-        self._executor = publication_executor
+        self._publication_service = publication_service
 
     def schedule_post(self, *, post_id: int, run_at: datetime) -> None:
-        """Одноразовое задание по id; при срабатывании вызывает PublicationExecutor.
-
-        На запуске задача передаёт только post_id в PublicationService, который
-        перечитывает БД. Это позволяет не хранить объект Post в памяти Scheduler.
-        """
+        """Одноразовое задание по id; при срабатывании запускает централизованное выполнение."""
         if run_at.tzinfo is None or run_at.utcoffset() != timedelta(0):
             raise ValueError("run_at должен быть aware UTC")
-        if self._posts is None or self._executor is None:
-            raise RuntimeError("Scheduler требует PostRepository и PublicationExecutor")
+        if self._posts is None and self._publication_service is None:
+            raise RuntimeError("Scheduler требует PostRepository для чтения задания")
         if not self.running:
             raise RuntimeError("Scheduler не запущен")
         self._scheduler.add_job(
@@ -94,24 +88,18 @@ class SchedulerService:
         return removed
 
     async def _on_post_due(self, post_id: int) -> None:
-        assert self._posts is not None and self._executor is not None
+        if self._publication_service is not None:
+            await self._publication_service.execute(post_id)
+            return
+        assert self._posts is not None
         post = await self._posts.get_by_id(post_id)
-        if post is None:
-            logger.warning("Post not found at execution time post_id=%s", post_id)
-            return
-        if post.status != PostStatus.PENDING:
-            logger.info(
-                "Post already processed post_id=%s status=%s",
-                post_id,
-                post.status,
-            )
-            return
-        try:
-            await self._executor.publish(post_id)
-        except PostNotFoundError:
-            logger.warning("Post disappeared before execution post_id=%s", post_id)
-        except Exception:
-            logger.exception("Publication execution failed post_id=%s", post_id)
+        # Пока конкретные Publisher не подключены (SPEC-014/015), оставляем PENDING
+        # для будущего recovery, не меняя статус в самом Scheduler (SPEC-013 §19).
+        logger.warning(
+            "Post due but execution is not implemented post_id=%s exists=%s",
+            post_id,
+            post is not None,
+        )
 
     @property
     def running(self) -> bool:

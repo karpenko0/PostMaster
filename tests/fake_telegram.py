@@ -51,8 +51,12 @@ class FakeTelegram:
     methods: list[str] = field(default_factory=list)
     # Тексты, которые бот отправил через sendMessage: chat_id и text в виде строк.
     sent_messages: list[dict[str, str]] = field(default_factory=list)
-    # Фото, которые бот отправил через sendPhoto: chat_id, photo (file_id) и caption.
-    sent_photos: list[dict[str, str]] = field(default_factory=list)
+    # Фотографии, которые бот отправил через sendPhoto: chat_id, photo (file_id) и caption.
+    sent_photos: list[dict[str, str | None]] = field(default_factory=list)
+    # Хронологический порядок всех исходящих событий (sendMessage и sendPhoto).
+    outbound_events: list[dict[str, Any]] = field(default_factory=list)
+    fail_send_message: tuple[int, str] | None = None
+    fail_send_photo: tuple[int, str] | None = None
     get_updates_called: asyncio.Event = field(default_factory=asyncio.Event)
     update_delivered: asyncio.Event = field(default_factory=asyncio.Event)
     _pending: list[dict[str, Any]] = field(default_factory=list)
@@ -218,14 +222,20 @@ class FakeTelegram:
         return _ok(True)
 
     async def _send_message(self, request: web.Request) -> web.Response:
+        if self.fail_send_message is not None:
+            code, description = self.fail_send_message
+            return web.json_response(
+                {"ok": False, "error_code": code, "description": description}, status=code
+            )
         params = await _request_params(request)
         chat_id = params.get("chat_id", "")
         text = params.get("text", "")
         self.sent_messages.append({"chat_id": chat_id, "text": text})
+        self.outbound_events.append({"method": "sendMessage", "chat_id": chat_id, "text": text})
         # Telegram возвращает отправленное сообщение. pyTelegramBotAPI разбирает его как Message.
         return _ok(
             {
-                "message_id": len(self.sent_messages),
+                "message_id": len(self.outbound_events),
                 "date": 1_700_000_000,
                 "chat": {"id": int(chat_id), "type": "private"},
                 "text": text,
@@ -233,26 +243,37 @@ class FakeTelegram:
         )
 
     async def _send_photo(self, request: web.Request) -> web.Response:
+        if self.fail_send_photo is not None:
+            code, description = self.fail_send_photo
+            return web.json_response(
+                {"ok": False, "error_code": code, "description": description}, status=code
+            )
         params = await _request_params(request)
         chat_id = params.get("chat_id", "")
         photo = params.get("photo", "")
-        caption = params.get("caption", "")
+        caption = params.get("caption")
         self.sent_photos.append({"chat_id": chat_id, "photo": photo, "caption": caption})
-        return _ok(
-            {
-                "message_id": len(self.sent_photos),
-                "date": 1_700_000_000,
-                "chat": {"id": int(chat_id), "type": "private"},
-                "photo": [
-                    {
-                        "file_id": photo,
-                        "file_unique_id": "fake",
-                        "width": 1280,
-                        "height": 960,
-                    }
-                ],
-            }
+        self.outbound_events.append(
+            {"method": "sendPhoto", "chat_id": chat_id, "photo": photo, "caption": caption}
         )
+        chat_numeric_id = int(chat_id) if str(chat_id).lstrip("-").isdigit() else -1001234567890
+        chat_type = "channel" if str(chat_id).startswith(("-100", "@")) else "private"
+        result: dict[str, Any] = {
+            "message_id": len(self.outbound_events),
+            "date": 1_700_000_000,
+            "chat": {"id": chat_numeric_id, "type": chat_type},
+            "photo": [
+                {
+                    "file_id": photo,
+                    "file_unique_id": f"{photo}-u",
+                    "width": 1280,
+                    "height": 960,
+                }
+            ],
+        }
+        if caption is not None:
+            result["caption"] = caption
+        return _ok(result)
 
     async def _get_updates(self, request: web.Request) -> web.Response:
         params = await _request_params(request)

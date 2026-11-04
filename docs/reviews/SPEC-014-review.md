@@ -2,97 +2,50 @@
 
 ## Объём и результат
 
-Проверена реализация `ReminderPublisher`: отправка текста и фото владельцу поста,
-обработка ошибок отсутствующего пользователя/файла, заблокированного бота и других
-ошибок Telegram API. Полный прогон на Python 3.14.6: **423 passed**, 1 skipped.
-`ruff check .`, `ruff format --check .` — успешно.
+Проверена реализация `ReminderPublisher`, контрактов `PublishResult`, `TelegramClient` и `BotTelegramClient`, метода `UserRepository.get_by_id`, интеграции с `PublicationService` (SPEC-013) и `SchedulerService`, а также сквозных сценариев доставки напоминания через `FakeTelegram`.
 
-Исходный текст SPEC-014: `docs/specs/SPEC-014-reminder-publisher.md`.
+Полный прогон на Python 3.12.11: **396 passed**, без падений и пропусков. `ruff check .`, `ruff format --check .`, `git diff --check` — чисто.
 
-## Матрица приёмки
+Контроль чувствительности: 8 мутаций M1–M8 (отключение проверки `publication_type == REMINDER`, отключение проверки `telegram_file_id`, пропуск проверки `user is None`, перестановка порядка `send_message` и `send_photo`, игнорирование `caption`, подмена кода ошибки `MESSAGE_SEND_FAILED`, подмена `INVALID_FILE_ID`, изменение `REMINDER_TEXT`) обнаружены тестами `tests/test_spec014.py`.
 
-| Проверяемый критерий | Доказательство | Вывод |
+## Матрица приёмки (AC-014-01 … AC-014-12)
+
+| Критерий | Проверка | Статус |
 |---|---|---|
-| Получает владельца Post | `test_reminder_success_sends_text_and_photo`, `test_reminder_with_user_service_resolver` | ✅ Через `ReminderRecipientResolver` |
-| Отправляет текст «Время публиковать!» | `test_reminder_success_sends_text_and_photo`, `test_reminder_uses_correct_text_template` | ✅ Шаблон `REMINDER_TEXT_TEMPLATE` |
-| Отправляет фото по telegram_file_id | `test_reminder_success_sends_text_and_photo`, `test_reminder_success_without_caption` | ✅ `send_photo` после `send_message` |
-| Caption добавляется при наличии | `test_reminder_success_sends_text_and_photo`, `test_reminder_success_without_caption` | ✅ Caption передаётся в `send_photo` |
-| Не скачивает файл | `test_reminder_success_sends_text_and_photo` | ✅ Используется только `telegram_file_id` |
-| Работает только после PROCESSING | `test_spec013.py::test_concurrent_claims_only_one_succeeds` | ✅ Гарантировано атомарным `claim_for_processing` (SPEC-013) |
-| Возвращает PublishResult | `test_reminder_returns_publish_result`, `test_reminder_success_sends_text_and_photo` | ✅ `PublishResult(post_id, external_id)` |
-| Final status меняет PublicationService | `test_publication_service_calls_publisher_only_after_successful_claim` | ✅ ReminderPublisher не меняет статус — это делает PublicationService |
+| AC-014-01 — отправка в личный чат владельца | `test_tc_014_01_successful_reminder_sends_text_then_photo_without_creating_files`, `test_e2e_54_normal_reminder_flow_delivers_message_and_photo_and_marks_published` | ✅ |
+| AC-014-02 — первым отправляется `REMINDER_TEXT` | `test_reminder_text_matches_spec014_verbatim`, `test_tc_014_01_successful_reminder_sends_text_then_photo_without_creating_files` | ✅ |
+| AC-014-03 — вторым отправляется фотография | `test_tc_014_01_successful_reminder_sends_text_then_photo_without_creating_files`, `test_e2e_54_normal_reminder_flow_delivers_message_and_photo_and_marks_published` | ✅ |
+| AC-014-04 — отправка по `telegram_file_id` без файлов на диске | `test_tc_014_01_successful_reminder_sends_text_then_photo_without_creating_files` (`list(tmp_path.iterdir()) == []`) | ✅ |
+| AC-014-05 — передача `caption`, если он заполнен | `test_tc_014_05_caption_present_is_forwarded_to_send_photo_and_not_logged`, `test_e2e_55_missed_reminder_executes_after_downtime_and_marks_published` | ✅ |
+| AC-014-06 — отправка без подписи при `caption=None` | `test_tc_014_06_caption_absent_sends_photo_without_caption` | ✅ |
+| AC-014-07 — `chat_id` берётся из `users.telegram_user_id` | `test_it_014_01_02_03_user_repository_resolution_caption_and_status_ownership` | ✅ |
+| AC-014-08 — отсутствие пользователя → `success=False`, `USER_NOT_FOUND` | `test_tc_014_03_user_missing_and_target_user_missing_do_not_call_telegram` | ✅ |
+| AC-014-09 — отсутствие `telegram_file_id` → `success=False`, `FILE_ID_MISSING` | `test_tc_014_04_file_missing_fails_before_telegram_calls` | ✅ |
+| AC-014-10 — успех दोनों вызовов → `PublishResult(success=True)` | `test_tc_014_01_successful_reminder_sends_text_then_photo_without_creating_files` | ✅ |
+| AC-014-11 — ошибка текста или фото → `PublishResult(success=False)` | `test_unit_49_message_error_returns_failure_and_skips_photo`, `test_unit_50_photo_error_and_invalid_file_id_return_failure` | ✅ |
+| AC-014-12 — `ReminderPublisher` не меняет `status` в БД самостоятельно | `test_it_014_01_02_03_user_repository_resolution_caption_and_status_ownership` | ✅ |
 
-## Обязательные проверки §8
+## Сверка тестов, ошибок, правил и инвариантов (§35–58)
 
-| Проверка | Тест | Статус |
+| Раздел SPEC-014 | Доказательство | Статус |
 |---|---|---|
-| success | `test_reminder_success_sends_text_and_photo`, `test_reminder_returns_publish_result` | ✅ |
-| no caption | `test_reminder_success_without_caption` | ✅ |
-| missing user | `test_reminder_missing_user_raises_error` | ✅ |
-| missing file | `test_reminder_missing_file_id_raises_error`, `test_reminder_missing_file_id_whitespace_raises_error` | ✅ |
-| blocked bot | `test_reminder_blocked_bot_on_send_message`, `test_reminder_blocked_bot_on_send_photo` | ✅ |
-| send errors | `test_reminder_non_blocked_error_propagates`, `test_reminder_photo_error_after_text_succeeds` | ✅ |
+| §35–37 Обработка blocked bot, invalid `file_id`, сетевых сбоев | `test_unit_50_photo_error_and_invalid_file_id_return_failure`, `test_it_014_53_publication_service_handles_permanent_and_temporary_reminder_errors`, `test_e2e_56_blocked_bot_returns_failure_and_marks_post_failed` | ✅ |
+| §38–41 Логирование без утечки `caption` и `telegram_file_id` | `test_tc_014_01...`, `test_tc_014_05...`, `test_unit_49...` | ✅ |
+| §42 Коды `ERR-014-01…06` и `INVALID_FILE_ID` | `test_tc_014_02…04`, `test_unit_49`, `test_unit_50` | ✅ |
+| §48–50 Unit Tests `TC-014-01…06`, ошибка сообщения, ошибка фото | `test_tc_014_01…06`, `test_unit_49`, `test_unit_50` | ✅ |
+| §51–53 Integration Tests `IT-014-01…03`, `PublicationService`, ошибки | `test_it_014_01_02_03...`, `test_it_014_52...`, `test_it_014_53...` | ✅ |
+| §54–56 E2E-сценарии (обычное напоминание, missed reminder, blocked bot) | `test_e2e_54...`, `test_e2e_55...`, `test_e2e_56...` | ✅ |
+| §57 Инварианты `INV-014-01…07` | Подтверждены модульными, интеграционными и сквозными тестами | ✅ |
 
-## Решения по реализации
+## Границы scope (§4)
 
-| # | Решение | Обоснование |
-|---|---|---|
-| D1 | `PublishResult` в `publishers/base.py` | §7 SPEC-014: «возвращает PublishResult». Общий контракт для всех Publisher'ов (Telegram/Reminder) |
-| D2 | `TelegramReminderSender` имеет два метода: `send_message` и `send_photo` | §1 SPEC-014: «отправляет текст … и фото по telegram_file_id» |
-| D3 | Текст отправляется до фото | Текст «Время публиковать!» + фото вместе формируют напоминание; порядок помогает пользователю |
-| D4 | `UserNotFoundError` и `PhotoDataMissingError` — отдельные исключения | §8 SPEC-014 «missing user/file» — разные причины ошибок |
-| D5 | `_is_bot_blocked` детектирует 403 и тексты ошибок | §8 SPEC-014 «blocked bot» — специфическая ошибка Telegram API |
-| D6 | Прочие ошибки Telegram пробрасываются без обёртки | §6 SPEC-014: «ошибка передаётся через общий error flow» |
-| D7 | Caption=None → `send_photo(..., caption=None)` | Telegram API поддерживает None caption |
+- Автопубликация в Telegram-канал (`TelegramPublisher`, SPEC-015), редактирование/отмена напоминаний (SPEC-019/020) и полноценный цикл повторных попыток по расписанию (SPEC-022) не входят в scope SPEC-014.
 
-## Сценарии
-
-### Happy path
-
-```
-ReminderPublisher.publish(post):
-1. post.telegram_file_id не пустой — иначе PhotoDataMissingError
-2. recipient_resolver.get_telegram_user_id(post.user_id) → telegram_user_id
-   или None → UserNotFoundError
-3. format_local_datetime(post.scheduled_at_utc, post.timezone) → local_time
-4. send_message(chat_id=telegram_user_id, text="🔔 Время публиковать!...")
-   или TelegramBlockedError / пробрасывание ошибки
-5. send_photo(chat_id=telegram_user_id, photo_file_id, caption)
-   или TelegramBlockedError / пробрасывание ошибки
-6. return PublishResult(post_id=post.id, external_id=...)
-```
-
-### Blocked bot
-
-```
-Telegram API: 403 Forbidden: bot was blocked by the user
-→ _is_bot_blocked(exc) == True
-→ raise TelegramBlockedError(...)
-```
-
-### Не-403 ошибка
-
-```
-Telegram API: network timeout / 400 Bad Request
-→ _is_bot_blocked(exc) == False
-→ raise exc  # пробрасывается
-```
-
-## Ограничения scope
-
-- ReminderPublisher не меняет статус Post — это делает PublicationService.
-- Если `send_photo` упал после успешного `send_message`, текст уже доставлен пользователю,
-  но пост переходит в FAILED. Это сделано сознательно: одна атомарная операция
-  «доставить напоминание» невозможна через два запроса, и частичная доставка лучше
-  полного молчания.
-- `_is_bot_blocked` использует эвристику по тексту ошибки (не только `error_code`),
-  потому что `ApiTelegramException` не всегда доступен в тестах.
-
-## Команды
+## Команды проверки
 
 ```bash
-python -m pytest tests/test_spec014.py -v -p no:cacheprovider
-python -m pytest -q -p no:cacheprovider
-python -m ruff check .
-python -m ruff format --check .
+/tmp/venv312/bin/python -m pytest -q -p no:cacheprovider
+/tmp/venv312/bin/ruff check .
+/tmp/venv312/bin/ruff format --check .
+git diff --check
 ```

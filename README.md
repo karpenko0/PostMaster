@@ -10,7 +10,11 @@ Telegram-бот для отложенных публикаций фотогра�
 ([SPEC-005](docs/specs/SPEC-005.md)) и преобразование часовых зон
 ([SPEC-006](docs/specs/SPEC-006.md)) и модель пользователей
 ([SPEC-007](docs/specs/SPEC-007.md)), а также таблица и репозиторий публикаций
-(SPEC-008) и их сохранение из диалога с регистрацией задания (SPEC-009).
+(SPEC-008), их сохранение из диалога с регистрацией задания (SPEC-009), защита
+от двойной публикации через atomic claim ([SPEC-013](docs/specs/SPEC-013.md)),
+отправка напоминания владельцу поста ([SPEC-014](docs/specs/SPEC-014.md)),
+автопубликация в Telegram-канал ([SPEC-015](docs/specs/SPEC-015.md)) и единая
+абстракция `Publisher` с `PublisherResolver` ([SPEC-016](docs/specs/SPEC-016.md)).
 Остальные команды появятся в следующих спецификациях.
 
 ## Требования
@@ -109,23 +113,15 @@ mkdir -p data && sudo chown -R 1000:1000 data
 задаются **конфигурацией бота**, а не в чате: по умолчанию `REMINDER`, для канала —
 `POST_MODE=TELEGRAM` и `TELEGRAM_TARGET_ID`.
 
-**Важно:** SPEC-009 регистрирует задания, а SPEC-010 выполняет их: при наступлении
-времени Scheduler вызывает `PublicationService`, который переводит пост `PENDING → PROCESSING → PUBLISHED`
-и публикует фото в Telegram-канал (`POST_MODE=TELEGRAM`) или отправляет напоминание пользователю
-(`POST_MODE=REMINDER`). Напоминание состоит из текста «Время публиковать!» и фотографии
-по `telegram_file_id` — файл не скачивается на сервер. При ошибке публикации пост переходит
-в `FAILED` с сообщением; сервис делает несколько попыток с настраиваемой задержкой.
-SPEC-011 восстанавливает задания после перезапуска: будущие PENDING-посты перепланируются,
-а overdue передаются в MissedPostHandler (SPEC-012), который перечитывает их из БД и публикует
-немедленно. SPEC-013 защищает от двойной публикации: атомарный claim `PENDING → PROCESSING`
-даёт право на отправку ровно одному исполнителю. SPEC-022 добавляет retry-механизм:
-при временной ошибке Telegram (таймаут, сеть, недоступность API) публикация
-повторяется три раза с задержками +30s, +2m, +10m; каждый повтор проходит тот же
-атомарный claim, а после исчерпания попыток пост переходит в `FAILED`. Ошибки прав
-доступа (чат недоступен, бот заблокирован) не повторяются. Команды пользователя:
-`/my_posts` (SPEC-017) показывает собственные запланированные публикации,
-`/cancel <post_id>` (SPEC-018) атомарно отменяет PENDING-публикацию и удаляет
-задание Scheduler.
+**Важно:** в SPEC-013 реализован централизованный идемпотентный поток
+`PublicationService.execute(post_id)` с атомарным захватом `PENDING → PROCESSING`
+(`claim_post_for_processing`) и переходами `PROCESSING → PUBLISHED / FAILED / PENDING`.
+Конкретные `ReminderPublisher` и `TelegramPublisher` появятся в SPEC-014/015, а
+восстановление заданий после рестарта и обработка пропущенных задач — в SPEC-011/012.
+Пока конкретные Publisher не подключены в `Application.from_settings`, сработавшее
+задание Scheduler только перечитывает запись и логирует отсутствие обработчика. Текст
+подтверждения описывает запланированное действие, а не факт доставки. Команды
+`/my_posts` и `/cancel` появятся в SPEC-017/018.
 
 Старые SQLite-БД, созданные до SPEC-007, всё ещё могут иметь `users.first_name NOT NULL`:
 `create_all` не изменяет существующие таблицы. Для обновления этой колонки потребуется
@@ -185,8 +181,8 @@ python -m postmaster backup --destination /var/backups/postmaster.db
 |----------------|-------------------------------------------------------------------|
 | `bot`          | Клиент Telegram, транспорт обновлений (Long Polling), хранилище состояния диалога |
 | `handlers`     | Telegram-обработчики. Только разбор сообщения и вызов сервиса     |
-| `services`     | Бизнес-логика: `DialogService`, `UserService`, `PhotoService`, `PostService`, `PublicationService`, `SchedulerService`, `RecoveryService`, `MissedPostHandler` |
-| `publishers`   | Интерфейс `Publisher` и реализации публикации                     |
+| `services`     | Бизнес-логика: `DialogService`, `UserService`, `PhotoService`, `PostService`, `PublicationService`, `SchedulerService` |
+| `publishers`   | Интерфейс `Publisher`, `PublishResult`, `PublisherResolver` (SPEC-016), `TelegramClient` и реализации `ReminderPublisher` (SPEC-014), `TelegramPublisher` (SPEC-015) |
 | `repositories` | Доступ к данным. Единственное место с запросами к БД              |
 | `domain`       | Доменные модели без зависимостей от Telegram и БД                 |
 | `database`     | Движок SQLAlchemy, сессии, базовый класс моделей                  |

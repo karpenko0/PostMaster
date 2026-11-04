@@ -1,400 +1,457 @@
-"""SPEC-016: Абстракция Publisher.
+"""SPEC-016: Абстракция Publisher, PublisherResolver, интеграция с PublicationService и E2E."""
 
-Тесты проверяют:
-- PublisherResolver маршрутизирует REMINDER → ReminderPublisher.
-- PublisherResolver маршрутизирует TELEGRAM → TelegramPublisher.
-- PublisherResolver возбуждает PublisherNotConfiguredError, если publisher не настроен.
-- PublisherResolver возбуждает UnknownPublicationTypeError для неизвестного типа.
-- PublicationService использует только протокол PublisherResolver (не concrete classes).
-- Scheduler/Recovery/MissedJob работают через протоколы, не знают о Publisher'ах.
-- Post с неизвестным типом не публикуется и переходит в FAILED.
-"""
-
+import asyncio
+import sqlite3
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from harness import db_path
+from fake_telegram import TEST_TOKEN, FakeTelegram
+from harness import db_path, future_date_text, wait_for_state, wait_until
+from postmaster.app import Application
+from postmaster.config import Settings
 from postmaster.database.engine import create_database_engine, create_session_factory
 from postmaster.database.schema import create_schema
-from postmaster.domain.post import PostStatus, PublicationType
-from postmaster.publishers.base import Publisher, PublishResult
-from postmaster.publishers.reminder_publisher import (
-    ReminderPublisher,
-)
-from postmaster.publishers.resolver import (
-    DefaultPublisherResolver,
-    PublisherNotConfiguredError,
+from postmaster.domain.dialog import DialogState
+from postmaster.domain.post import Post, PostStatus, PublicationType
+from postmaster.domain.user import User
+from postmaster.publishers import (
+    REMINDER_TEXT,
+    InvalidPublicationTypeError,
+    Publisher,
+    PublisherNotFoundError,
     PublisherResolver,
-    UnknownPublicationTypeError,
-)
-from postmaster.publishers.telegram_publisher import (
-    TelegramChannelPublisher,
+    PublisherResolverErrorCode,
+    PublishResult,
+    ReminderPublisher,
+    TelegramPublisher,
 )
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
-from postmaster.services.publication_service import (
-    PublicationError,
-    PublicationService,
-)
+from postmaster.services.publication_service import PublicationService
+from postmaster.services.scheduler_service import SchedulerService
 
-RUN_AT = datetime(2026, 10, 20, 12, tzinfo=UTC)
+CREATED_AT = datetime(2026, 10, 7, 16, 0, tzinfo=UTC)
+SCHEDULED_AT = datetime(2026, 10, 7, 17, 0, tzinfo=UTC)
+CLAIM_AT = datetime(2026, 10, 7, 17, 0, 1, tzinfo=UTC)
+PUBLISHED_AT = datetime(2026, 10, 7, 17, 0, 2, tzinfo=UTC)
+CHANNEL_ID = "-1001234567890"
 
 
-class FakePublisher(Publisher):
-    """Универсальный Publisher для тестов, не привязан к Telegram API."""
+class RecordingTelegramClient:
+    """Тестовый TelegramClient для проверки вызовов обоих Publisher."""
 
-    def __init__(self, name: str = "fake") -> None:
-        self.name = name
-        self.calls: list[object] = []
-        self.fail_with: Exception | None = None
+    def __init__(self) -> None:
+        self.messages: list[tuple[str | int, str]] = []
+        self.photos: list[tuple[str | int, str, str | None]] = []
 
-    async def publish(self, post: object) -> PublishResult:
-        self.calls.append(post)
-        if self.fail_with is not None:
-            raise self.fail_with
-        return PublishResult(post_id=getattr(post, "id", 0), external_id=f"{self.name}_msg")
+    async def send_message(self, chat_id: str | int, text: str) -> None:
+        self.messages.append((chat_id, text))
+
+    async def send_photo(
+        self,
+        chat_id: str | int,
+        file_id: str,
+        caption: str | None = None,
+    ) -> None:
+        self.photos.append((chat_id, file_id, caption))
+
+
+class StubUserRepository:
+    def __init__(self, user: User | None) -> None:
+        self._user = user
+
+    async def get_by_id(self, user_id: int) -> User | None:
+        return self._user
 
 
 @pytest.fixture
-async def post_repo(tmp_path: Path) -> AsyncIterator[tuple[PostRepository, int]]:
-    """Создаёт репозиторий постов и тестового пользователя."""
-    engine = create_database_engine(f"sqlite+aiosqlite:///{db_path(tmp_path)}")
+async def spec016_db(
+    tmp_path: Path,
+) -> AsyncIterator[tuple[async_sessionmaker[AsyncSession], UserRepository, PostRepository, User]]:
+    engine = create_database_engine(f"sqlite+aiosqlite:///{tmp_path}/spec016.db")
     try:
         await create_schema(engine)
-        factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)
+        factory = create_session_factory(engine)
         user_repo = UserRepository(factory)
+        post_repo = PostRepository(factory)
         user = await user_repo.add(
-            telegram_user_id=999,
-            first_name="Resolver",
-            username="resolver",
-            now=datetime(2026, 10, 7, tzinfo=UTC),
+            telegram_user_id=700222333,
+            username="spec016_user",
+            first_name="Ирина",
+            now=CREATED_AT,
         )
-        yield PostRepository(factory), user.id
+        yield factory, user_repo, post_repo, user
     finally:
         await engine.dispose()
 
 
-async def _create_post(
-    repo: PostRepository,
-    user_id: int,
-    *,
-    publication_type: PublicationType,
-    target_id: str | None = "-1001234567890",
-) -> int:
-    post = await repo.create_post(
-        user_id=user_id,
-        telegram_file_id="AgAC_resolver_test",
-        telegram_file_unique_id="AQAD_resolver_test",
-        scheduled_at_utc=RUN_AT,
+# ---------------------------------------------------------------------------
+# §24 Unit Tests (TC-016-01 … TC-016-04)
+# ---------------------------------------------------------------------------
+
+
+def test_tc_016_01_02_resolver_returns_registered_reminder_and_telegram_publishers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """TC-016-01, TC-016-02, AC-016-02, AC-016-03, §10–11, §16, §22."""
+    client = RecordingTelegramClient()
+    user_repo = StubUserRepository(None)
+    reminder_pub = ReminderPublisher(client, user_repo)
+    telegram_pub = TelegramPublisher(client)
+
+    resolver = PublisherResolver(
+        reminder_publisher=reminder_pub,
+        telegram_publisher=telegram_pub,
+    )
+
+    with caplog.at_level("INFO", logger="postmaster.publishers.resolver"):
+        resolved_reminder = resolver.resolve(PublicationType.REMINDER, post_id=10)
+        resolved_telegram = resolver.resolve(PublicationType.TELEGRAM, post_id=20)
+
+    assert resolved_reminder is reminder_pub
+    assert resolved_telegram is telegram_pub
+    # §16: Resolver не пересоздаёт Publisher при каждом вызове.
+    assert resolver.resolve(PublicationType.REMINDER) is reminder_pub
+    assert resolver.resolve("TELEGRAM") is telegram_pub
+    assert "Publisher resolved post_id=10 type=REMINDER" in caplog.text
+    assert "Publisher resolved post_id=20 type=TELEGRAM" in caplog.text
+
+
+@pytest.mark.parametrize("unknown_type", ["UNKNOWN", "VK", "INSTAGRAM"])
+def test_tc_016_03_unknown_type_raises_publisher_not_found_and_logs_error(
+    unknown_type: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """TC-016-03, ERR-016-01, §12, §21, §22: неизвестный тип → PUBLISHER_NOT_FOUND."""
+    client = RecordingTelegramClient()
+    resolver = PublisherResolver(
+        reminder_publisher=ReminderPublisher(client, StubUserRepository(None)),
+        telegram_publisher=TelegramPublisher(client),
+    )
+
+    with caplog.at_level("ERROR", logger="postmaster.publishers.resolver"):
+        with pytest.raises(PublisherNotFoundError) as exc_info:
+            resolver.resolve(unknown_type, post_id=42)
+
+    assert exc_info.value.error_code == PublisherResolverErrorCode.PUBLISHER_NOT_FOUND.value
+    assert f"Publisher not found post_id=42 publication_type={unknown_type}" in caplog.text
+
+
+@pytest.mark.parametrize("invalid_type", [None, "", "   ", 123, True])
+def test_err_016_02_invalid_publication_type_raises_invalid_publication_type(
+    invalid_type: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ERR-016-02, §12, §21: некорректный тип публикации → INVALID_PUBLICATION_TYPE."""
+    resolver = PublisherResolver()
+
+    with caplog.at_level("ERROR", logger="postmaster.publishers.resolver"):
+        with pytest.raises(InvalidPublicationTypeError) as exc_info:
+            resolver.resolve(invalid_type, post_id=99)
+
+    assert exc_info.value.error_code == PublisherResolverErrorCode.INVALID_PUBLICATION_TYPE.value
+    assert "Publisher not found post_id=99" in caplog.text
+
+
+async def test_tc_016_04_both_publishers_implement_unified_publish_contract() -> None:
+    """TC-016-04, AC-016-01, AC-016-07, BR-016-01…03, INV-016-01."""
+    user = User(
+        id=7,
+        telegram_user_id=500600,
+        username="unified",
+        first_name="Олег",
         timezone="Europe/Moscow",
-        publication_type=publication_type,
-        target_id=target_id,
+        created_at=CREATED_AT,
+        updated_at=CREATED_AT,
     )
-    return post.id
-
-
-# === PublisherResolver tests (SPEC-016 §8 resolver reminder/telegram/unknown) ===
-
-
-async def test_resolver_routes_reminder_to_reminder_publisher() -> None:
-    """REMINDER → ReminderPublisher."""
-    reminder = FakePublisher(name="reminder")
-    telegram = FakePublisher(name="telegram")
-    resolver = DefaultPublisherResolver(telegram_publisher=telegram, reminder_publisher=reminder)
-
-    publisher = resolver.resolve(PublicationType.REMINDER)
-
-    assert publisher is reminder
-
-
-async def test_resolver_routes_telegram_to_telegram_publisher() -> None:
-    """TELEGRAM → TelegramChannelPublisher."""
-    reminder = FakePublisher(name="reminder")
-    telegram = FakePublisher(name="telegram")
-    resolver = DefaultPublisherResolver(telegram_publisher=telegram, reminder_publisher=reminder)
-
-    publisher = resolver.resolve(PublicationType.TELEGRAM)
-
-    assert publisher is telegram
-
-
-async def test_resolver_unknown_type_rejected() -> None:
-    """Неизвестный тип публикации → UnknownPublicationTypeError."""
-    resolver = DefaultPublisherResolver(
-        telegram_publisher=FakePublisher(), reminder_publisher=FakePublisher()
-    )
-
-    # Создаём фиктивный тип, который не равен TELEGRAM или REMINDER
-    # Используем прямое сравнение строк через enum
-    class _FakeEnum(str):
-        pass
-
-    fake_type = _FakeEnum("VK")
-
-    with pytest.raises(UnknownPublicationTypeError):
-        resolver.resolve(fake_type)  # type: ignore[arg-type]
-
-
-async def test_resolver_unknown_publication_type_keeps_post_safe() -> None:
-    """Неизвестный тип не публикуется — пост остаётся нетронутым."""
-    resolver = DefaultPublisherResolver(
-        telegram_publisher=FakePublisher(), reminder_publisher=FakePublisher()
-    )
-
-    class _FakeEnum(str):
-        pass
-
-    fake_type = _FakeEnum("VK")
-
-    with pytest.raises(UnknownPublicationTypeError):
-        resolver.resolve(fake_type)  # type: ignore[arg-type]
-
-
-async def test_resolver_telegram_not_configured_raises() -> None:
-    """TELEGRAM publisher не настроен → PublisherNotConfiguredError."""
-    resolver = DefaultPublisherResolver(telegram_publisher=None, reminder_publisher=FakePublisher())
-
-    with pytest.raises(PublisherNotConfiguredError) as exc_info:
-        resolver.resolve(PublicationType.TELEGRAM)
-    assert exc_info.value.publication_type == PublicationType.TELEGRAM
-
-
-async def test_resolver_reminder_not_configured_raises() -> None:
-    """REMINDER publisher не настроен → PublisherNotConfiguredError."""
-    resolver = DefaultPublisherResolver(telegram_publisher=FakePublisher(), reminder_publisher=None)
-
-    with pytest.raises(PublisherNotConfiguredError) as exc_info:
-        resolver.resolve(PublicationType.REMINDER)
-    assert exc_info.value.publication_type == PublicationType.REMINDER
-
-
-async def test_resolver_with_only_reminder_configured() -> None:
-    """Если настроен только REMINDER — TELEGRAM запрещён."""
-    reminder = FakePublisher()
-    resolver = DefaultPublisherResolver(telegram_publisher=None, reminder_publisher=reminder)
-
-    assert resolver.resolve(PublicationType.REMINDER) is reminder
-
-    with pytest.raises(PublisherNotConfiguredError):
-        resolver.resolve(PublicationType.TELEGRAM)
-
-
-async def test_resolver_with_only_telegram_configured() -> None:
-    """Если настроен только TELEGRAM — REMINDER запрещён."""
-    telegram = FakePublisher()
-    resolver = DefaultPublisherResolver(telegram_publisher=telegram, reminder_publisher=None)
-
-    assert resolver.resolve(PublicationType.TELEGRAM) is telegram
-
-    with pytest.raises(PublisherNotConfiguredError):
-        resolver.resolve(PublicationType.REMINDER)
-
-
-async def test_resolver_with_no_publishers_configured() -> None:
-    """Если ничего не настроено — оба типа запрещены."""
-    resolver = DefaultPublisherResolver()
-
-    with pytest.raises(PublisherNotConfiguredError):
-        resolver.resolve(PublicationType.TELEGRAM)
-
-    with pytest.raises(PublisherNotConfiguredError):
-        resolver.resolve(PublicationType.REMINDER)
-
-
-def test_publisher_resolver_protocol_runtime_check() -> None:
-    """DefaultPublisherResolver соответствует протоколу PublisherResolver."""
-    resolver: PublisherResolver = DefaultPublisherResolver()
-    # Проверяем, что метод resolve доступен и вызываем
-    with pytest.raises(PublisherNotConfiguredError):
-        resolver.resolve(PublicationType.REMINDER)
-
-
-# === PublicationService success/failure (SPEC-016 §8 service success/failure) ===
-
-
-async def test_publication_service_uses_resolver_to_route_reminder(post_repo) -> None:
-    """PublicationService использует PublisherResolver для REMINDER поста."""
-    repo, user_id = post_repo
-    reminder = FakePublisher(name="reminder")
-    telegram = FakePublisher(name="telegram")
-    resolver = DefaultPublisherResolver(telegram_publisher=telegram, reminder_publisher=reminder)
-    service = PublicationService(repo, resolver)
-
-    post_id = await _create_post(repo, user_id, publication_type=PublicationType.REMINDER)
-    result = await service.publish(post_id)
-
-    assert result.status == PostStatus.PUBLISHED
-    assert reminder.calls and not telegram.calls
-    assert len(reminder.calls) == 1
-
-
-async def test_publication_service_uses_resolver_to_route_telegram(post_repo) -> None:
-    """PublicationService использует PublisherResolver для TELEGRAM поста."""
-    repo, user_id = post_repo
-    reminder = FakePublisher(name="reminder")
-    telegram = FakePublisher(name="telegram")
-    resolver = DefaultPublisherResolver(telegram_publisher=telegram, reminder_publisher=reminder)
-    service = PublicationService(repo, resolver)
-
-    post_id = await _create_post(repo, user_id, publication_type=PublicationType.TELEGRAM)
-    result = await service.publish(post_id)
-
-    assert result.status == PostStatus.PUBLISHED
-    assert telegram.calls and not reminder.calls
-    assert len(telegram.calls) == 1
-
-
-async def test_publication_service_unknown_type_marks_failed(post_repo) -> None:
-    """Неизвестный тип → пост в FAILED, Publisher не вызван."""
-    repo, user_id = post_repo
-    reminder = FakePublisher(name="reminder")
-    telegram = FakePublisher(name="telegram")
-
-    class _UnknownTypeResolver:
-        """Резолвер, который не знает ни одного типа (имитация расширения enum)."""
-
-        def resolve(self, publication_type: PublicationType) -> Publisher:
-            raise UnknownPublicationTypeError(publication_type)
-
-    service = PublicationService(repo, _UnknownTypeResolver())
-
-    post_id = await _create_post(repo, user_id, publication_type=PublicationType.TELEGRAM)
-
-    with pytest.raises(PublicationError):
-        await service.publish(post_id)
-
-    # Publisher'ы не вызваны
-    assert reminder.calls == []
-    assert telegram.calls == []
-
-    # Пост в FAILED с информативным сообщением
-    result = await repo.get_by_id(post_id)
-    assert result is not None
-    assert result.status == PostStatus.FAILED
-    assert "неизвестный тип публикации" in (result.error_message or "")
-
-
-async def test_publication_service_routes_valid_type_after_resolver_update(post_repo) -> None:
-    """PublicationService корректно работает с типом из БД (happy path через резолвер)."""
-    repo, user_id = post_repo
-    reminder = FakePublisher(name="reminder")
-    telegram = FakePublisher(name="telegram")
-    resolver = DefaultPublisherResolver(telegram_publisher=telegram, reminder_publisher=reminder)
-    service = PublicationService(repo, resolver)
-
-    post_id = await _create_post(repo, user_id, publication_type=PublicationType.TELEGRAM)
-    result = await service.publish(post_id)
-
-    assert result.status == PostStatus.PUBLISHED
-    assert telegram.calls and not reminder.calls
-
-
-async def test_publication_service_publisher_not_configured_marks_failed(post_repo) -> None:
-    """Publisher не настроен → пост в FAILED, конкретный Publisher не вызван."""
-    repo, user_id = post_repo
-    # Только REMINDER publisher, TELEGRAM пост не должен публиковаться
-    reminder = FakePublisher(name="reminder")
-    resolver = DefaultPublisherResolver(telegram_publisher=None, reminder_publisher=reminder)
-    service = PublicationService(repo, resolver)
-
-    post_id = await _create_post(repo, user_id, publication_type=PublicationType.TELEGRAM)
-    with pytest.raises(PublicationError):
-        await service.publish(post_id)
-
-    assert reminder.calls == []
-    result = await repo.get_by_id(post_id)
-    assert result is not None
-    assert result.status == PostStatus.FAILED
-    assert "TELEGRAM" in (result.error_message or "")
-
-
-# === Scheduler/Recovery/MissedJob decoupling (SPEC-016 §7) ===
-
-
-def test_scheduler_uses_publication_executor_protocol() -> None:
-    """SchedulerService принимает PublicationExecutor (протокол), не конкретный класс."""
-    from postmaster.services.scheduler_service import PublicationExecutor
-
-    class _NoopExecutor:
-        async def publish(self, post_id: int) -> None:
-            return None
-
-    # Тип-чекинг: _NoopExecutor соответствует PublicationExecutor (structural typing)
-    executor: PublicationExecutor = _NoopExecutor()
-    assert hasattr(executor, "publish")
-
-
-def test_recovery_uses_missed_post_gateway_protocol() -> None:
-    """RecoveryService принимает MissedPostGateway (протокол), не конкретный класс."""
-    from postmaster.services.recovery_service import MissedPostGateway
-
-    class _NoopMissedHandler:
-        async def handle(self, post_id: int) -> None:
-            return None
-
-    # Тип-чекинг: _NoopMissedHandler соответствует MissedPostGateway
-    handler: MissedPostGateway = _NoopMissedHandler()
-    assert hasattr(handler, "handle")
-
-
-async def test_missed_post_handler_uses_publication_executor_protocol() -> None:
-    """MissedPostHandler принимает PublicationExecutor (протокол), не конкретный класс."""
-    from postmaster.services.missed_post_handler import PublicationExecutor
-
-    class _NoopExecutor:
-        async def publish(self, post_id: int) -> None:
-            return None
-
-    executor: PublicationExecutor = _NoopExecutor()
-    assert hasattr(executor, "publish")
-
-
-# === Publisher base contract (SPEC-016 §1, §4) ===
-
-
-def test_publisher_is_abstract() -> None:
-    """Publisher — абстрактный класс с методом publish."""
-    with pytest.raises(TypeError):
-        Publisher()  # type: ignore[abstract]
-
-
-def test_publish_result_is_dataclass() -> None:
-    """PublishResult — dataclass с обязательными полями."""
-    result = PublishResult(post_id=1)
-    assert result.post_id == 1
-    assert result.external_id is None
-
-    result_with_id = PublishResult(post_id=2, external_id="msg_42")
-    assert result_with_id.post_id == 2
-    assert result_with_id.external_id == "msg_42"
-
-
-async def test_concrete_publishers_return_publish_result() -> None:
-    """ReminderPublisher и TelegramChannelPublisher возвращают PublishResult."""
-    # Проверяем, что оба реализуют единый контракт
-    from postmaster.publishers.reminder_publisher import ReminderRecipientResolver
-    from postmaster.publishers.telegram_publisher import TelegramSender
-
-    class _StubRecipientResolver:
-        async def get_telegram_user_id(self, user_id: int) -> int | None:
-            return 42
-
-    class _StubTelegramSender:
-        async def send_photo(
-            self, *, chat_id: str, photo_file_id: str, caption: str | None = None
-        ) -> dict:
-            return {"message_id": 1}
-
-    # Тип-чекинг через протоколы
-    recipient: ReminderRecipientResolver = _StubRecipientResolver()
-    sender: TelegramSender = _StubTelegramSender()
-
-    reminder_pub = ReminderPublisher(sender, recipient)  # type: ignore[arg-type]
-    telegram_pub = TelegramChannelPublisher(sender)  # type: ignore[arg-type]
+    client = RecordingTelegramClient()
+    reminder_pub = ReminderPublisher(client, StubUserRepository(user))
+    telegram_pub = TelegramPublisher(client)
 
     assert isinstance(reminder_pub, Publisher)
     assert isinstance(telegram_pub, Publisher)
+
+    reminder_post = Post(
+        id=1,
+        user_id=user.id,
+        telegram_file_id="AgAC_rem_1",
+        telegram_file_unique_id="AQAD_rem_1",
+        scheduled_at_utc=SCHEDULED_AT,
+        timezone="Europe/Moscow",
+        status=PostStatus.PROCESSING,
+        publication_type=PublicationType.REMINDER,
+        created_at=CREATED_AT,
+        updated_at=CLAIM_AT,
+    )
+    telegram_post = Post(
+        id=2,
+        user_id=user.id,
+        telegram_file_id="AgAC_tg_2",
+        telegram_file_unique_id="AQAD_tg_2",
+        scheduled_at_utc=SCHEDULED_AT,
+        timezone="Europe/Moscow",
+        status=PostStatus.PROCESSING,
+        publication_type=PublicationType.TELEGRAM,
+        target_id=CHANNEL_ID,
+        created_at=CREATED_AT,
+        updated_at=CLAIM_AT,
+    )
+
+    res_rem = await reminder_pub.publish(reminder_post)
+    res_tg = await telegram_pub.publish(telegram_post)
+
+    assert isinstance(res_rem, PublishResult) and res_rem == PublishResult(
+        success=True, error_code=None, error_message=None
+    )
+    assert isinstance(res_tg, PublishResult) and res_tg == PublishResult(
+        success=True, error_code=None, error_message=None
+    )
+
+
+# ---------------------------------------------------------------------------
+# §25 PublicationService Tests & §26 Integration Tests (IT-016-01 … IT-016-03)
+# ---------------------------------------------------------------------------
+
+
+async def test_publication_service_calls_mark_published_on_success_and_error_flow_on_failure(
+    spec016_db,
+) -> None:
+    """§25 PublicationService Tests, AC-016-04, AC-016-08, BR-016-07…08, INV-016-04…05."""
+    _, _, post_repo, user = spec016_db
+
+    class StubResultPublisher(Publisher):
+        def __init__(self, result: PublishResult) -> None:
+            self._result = result
+            self.calls: list[int] = []
+
+        async def publish(self, post: Any) -> PublishResult:
+            self.calls.append(post.id)
+            return self._result
+
+    ok_pub = StubResultPublisher(PublishResult(success=True))
+    fail_pub = StubResultPublisher(
+        PublishResult(
+            success=False,
+            error_code="TELEGRAM_PERMISSION_DENIED",
+            error_message="Forbidden",
+        )
+    )
+    resolver = PublisherResolver(
+        reminder_publisher=ok_pub,
+        telegram_publisher=fail_pub,
+    )
+    service = PublicationService(
+        post_repo,
+        publisher_resolver=resolver,
+        now_fn=lambda: PUBLISHED_AT,
+    )
+    assert service.publisher_resolver is resolver
+
+    # 1) success=True → mark_published()
+    post_ok = await post_repo.create_post(
+        user_id=user.id,
+        telegram_file_id="AgAC_ok",
+        telegram_file_unique_id="AQAD_ok",
+        scheduled_at_utc=SCHEDULED_AT,
+        timezone="Europe/Moscow",
+        publication_type=PublicationType.REMINDER,
+        now=CREATED_AT,
+    )
+    assert await service.execute(post_ok.id) is True
+    saved_ok = await post_repo.get_by_id(post_ok.id)
+    assert saved_ok is not None and saved_ok.status == PostStatus.PUBLISHED
+    assert saved_ok.published_at == PUBLISHED_AT
+
+    # 2) success=False → error flow (mark_failed)
+    post_fail = await post_repo.create_post(
+        user_id=user.id,
+        telegram_file_id="AgAC_fail",
+        telegram_file_unique_id="AQAD_fail",
+        scheduled_at_utc=SCHEDULED_AT,
+        timezone="Europe/Moscow",
+        publication_type=PublicationType.TELEGRAM,
+        target_id=CHANNEL_ID,
+        now=CREATED_AT,
+    )
+    assert await service.execute(post_fail.id) is False
+    saved_fail = await post_repo.get_by_id(post_fail.id)
+    assert saved_fail is not None and saved_fail.status == PostStatus.FAILED
+    assert saved_fail.error_message == "Forbidden"
+
+    # 3) AC-016-04, BR-016-08, ERR-016-01: незарегистрированный тип не вызывает Publisher
+    only_reminder_resolver = PublisherResolver(reminder_publisher=ok_pub)
+    service_unregistered = PublicationService(
+        post_repo,
+        publisher_resolver=only_reminder_resolver,
+        now_fn=lambda: PUBLISHED_AT,
+    )
+    post_unreg = await post_repo.create_post(
+        user_id=user.id,
+        telegram_file_id="AgAC_unreg",
+        telegram_file_unique_id="AQAD_unreg",
+        scheduled_at_utc=SCHEDULED_AT,
+        timezone="Europe/Moscow",
+        publication_type=PublicationType.TELEGRAM,
+        target_id=CHANNEL_ID,
+        now=CREATED_AT,
+    )
+    calls_before = list(ok_pub.calls)
+    assert await service_unregistered.execute(post_unreg.id) is False
+    assert ok_pub.calls == calls_before
+    saved_unreg = await post_repo.get_by_id(post_unreg.id)
+    assert saved_unreg is not None and saved_unreg.status == PostStatus.FAILED
+    assert saved_unreg.error_message is not None
+    assert "PUBLISHER_NOT_FOUND" in saved_unreg.error_message
+
+
+async def test_it_016_01_02_03_and_vk_extensibility_without_scheduler_changes(
+    spec016_db,
+) -> None:
+    """§20, §26 IT-016-01…03, AC-016-05…06, AC-016-09: REMINDER, TELEGRAM и расширение VK."""
+    _, user_repo, post_repo, user = spec016_db
+    client = RecordingTelegramClient()
+    reminder_pub = ReminderPublisher(client, user_repo)
+    telegram_pub = TelegramPublisher(client)
+    resolver = PublisherResolver(
+        reminder_publisher=reminder_pub,
+        telegram_publisher=telegram_pub,
+    )
+    pub_service = PublicationService(
+        post_repo,
+        publisher_resolver=resolver,
+        now_fn=lambda: PUBLISHED_AT,
+    )
+    scheduler = SchedulerService(post_repo, pub_service)
+
+    # IT-016-01 & IT-016-03 (REMINDER): PENDING → PROCESSING → Resolver → PUBLISHED
+    rem_post = await post_repo.create_post(
+        user_id=user.id,
+        telegram_file_id="AgAC_it16_rem",
+        telegram_file_unique_id="AQAD_it16_rem",
+        scheduled_at_utc=SCHEDULED_AT,
+        timezone="Europe/Moscow",
+        publication_type=PublicationType.REMINDER,
+        caption="Подпись напоминания",
+        now=CREATED_AT,
+    )
+    await scheduler._on_post_due(rem_post.id)
+
+    rem_saved = await post_repo.get_by_id(rem_post.id)
+    assert rem_saved is not None and rem_saved.status == PostStatus.PUBLISHED
+    assert client.messages == [(user.telegram_user_id, REMINDER_TEXT)]
+    assert client.photos[0] == (
+        user.telegram_user_id,
+        "AgAC_it16_rem",
+        "Подпись напоминания",
+    )
+
+    # IT-016-02 & IT-016-03 (TELEGRAM): PENDING → PROCESSING → Resolver → PUBLISHED
+    tg_post = await post_repo.create_post(
+        user_id=user.id,
+        telegram_file_id="AgAC_it16_tg",
+        telegram_file_unique_id="AQAD_it16_tg",
+        scheduled_at_utc=SCHEDULED_AT,
+        timezone="Europe/Moscow",
+        publication_type=PublicationType.TELEGRAM,
+        target_id=CHANNEL_ID,
+        caption="Подпись канала",
+        now=CREATED_AT,
+    )
+    await scheduler._on_post_due(tg_post.id)
+
+    tg_saved = await post_repo.get_by_id(tg_post.id)
+    assert tg_saved is not None and tg_saved.status == PostStatus.PUBLISHED
+    assert client.photos[1] == (CHANNEL_ID, "AgAC_it16_tg", "Подпись канала")
+
+    # §20, US-016-03, AC-016-09: регистрация VKPublisher без правок Scheduler
+    class VKPublisher(Publisher):
+        def __init__(self) -> None:
+            self.published_ids: list[int] = []
+
+        async def publish(self, post: Any) -> PublishResult:
+            self.published_ids.append(post.id)
+            return PublishResult(success=True)
+
+    vk_pub = VKPublisher()
+    resolver.register("VK", vk_pub)
+    assert resolver.resolve("VK") is vk_pub
+    vk_res = await resolver.resolve("VK").publish(SimpleNamespace(id=777))
+    assert vk_res.success is True
+    assert vk_pub.published_ids == [777]
+
+
+# ---------------------------------------------------------------------------
+# §27 E2E Scenarios (REMINDER & TELEGRAM через Application.from_settings)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("post_mode", "target_id"),
+    [
+        ("REMINDER", None),
+        ("TELEGRAM", CHANNEL_ID),
+    ],
+)
+async def test_e2e_27_scheduler_to_resolver_to_publisher_for_reminder_and_telegram(
+    post_mode: str,
+    target_id: str | None,
+    fake_telegram: FakeTelegram,
+    tmp_path: Path,
+) -> None:
+    """§27 E2E: Scheduler → PublicationService → Claim → Resolver → Publisher → PUBLISHED."""
+    settings = Settings(
+        bot_token=TEST_TOKEN,
+        database_url=f"sqlite+aiosqlite:///{db_path(tmp_path)}",
+        log_level="INFO",
+        post_mode=post_mode,
+        telegram_target_id=target_id,
+    )
+    app = Application.from_settings(settings)
+    task = asyncio.create_task(app.run())
+    try:
+        await asyncio.wait_for(fake_telegram.get_updates_called.wait(), timeout=5.0)
+        fake_telegram.add_text_message("/start", chat_id=42, user_id=42)
+        await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
+
+        fake_telegram.add_photo_message(f"photo-{post_mode}", chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_DATETIME)
+
+        fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
+        await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+        await wait_for_state(app, 42, DialogState.IDLE)
+
+        with sqlite3.connect(db_path(tmp_path)) as conn:
+            post_id, saved_type, status = conn.execute(
+                "SELECT id, publication_type, status FROM posts"
+            ).fetchone()
+        assert (saved_type, status) == (post_mode, "PENDING")
+        before_idx = len(fake_telegram.outbound_events)
+
+        await app._scheduler._on_post_due(post_id)
+
+        events = fake_telegram.outbound_events[before_idx:]
+        if post_mode == "REMINDER":
+            assert [e["method"] for e in events] == ["sendMessage", "sendPhoto"]
+            assert events[0]["chat_id"] == "42"
+            assert events[0]["text"] == REMINDER_TEXT
+            assert events[1]["chat_id"] == "42"
+            assert events[1]["photo"] == "photo-REMINDER"
+        else:
+            assert [e["method"] for e in events] == ["sendPhoto"]
+            assert events[0]["chat_id"] == CHANNEL_ID
+            assert events[0]["photo"] == "photo-TELEGRAM"
+
+        with sqlite3.connect(db_path(tmp_path)) as conn:
+            final_status, published_at = conn.execute(
+                "SELECT status, published_at FROM posts WHERE id=?",
+                (post_id,),
+            ).fetchone()
+        assert final_status == "PUBLISHED"
+        assert published_at is not None
+    finally:
+        await app.stop()
+        await asyncio.wait_for(task, timeout=5.0)

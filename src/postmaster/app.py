@@ -33,12 +33,10 @@ from postmaster.database.health import probe_database
 from postmaster.database.schema import create_schema
 from postmaster.domain.post import PublicationType
 from postmaster.handlers.registry import register_handlers
-from postmaster.publishers import (
-    DefaultPublisherResolver,
-    ReminderPublisher,
-    TelegramChannelPublisher,
-    TelegramErrorMapper,
-)
+from postmaster.publishers.base import BotTelegramClient
+from postmaster.publishers.reminder import ReminderPublisher
+from postmaster.publishers.resolver import PublisherResolver
+from postmaster.publishers.telegram import TelegramPublisher
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.cancel_service import CancelService
@@ -48,11 +46,7 @@ from postmaster.services.missed_post_handler import MissedPostHandler
 from postmaster.services.my_posts_service import MyPostsService
 from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
-from postmaster.services.publication_service import PublicationService, RetryPolicy
-from postmaster.services.recipient_resolver import (
-    UserServiceReminderRecipientResolver,
-)
-from postmaster.services.recovery_service import RecoveryService
+from postmaster.services.publication_service import PublicationService
 from postmaster.services.scheduler_service import SchedulerService
 from postmaster.services.user_service import UserService
 from postmaster.utils.health import (
@@ -115,50 +109,31 @@ class Application:
         """Создаёт боевую конфигурацию из настроек. Сеть на этом шаге не используется."""
         engine = create_database_engine(settings.database_url)
         session_factory = create_session_factory(engine)
+        user_repository = UserRepository(session_factory)
         user_service = UserService(
-            UserRepository(session_factory),
+            user_repository,
             default_timezone=settings.default_timezone,
         )
         post_repository = PostRepository(session_factory)
         bot = create_bot(settings.bot_token.get_secret_value())
-
-        photo_sender = BotTelegramSender(bot)
-        reminder_sender = BotTelegramReminderSender(bot)
-
-        recipient_resolver = UserServiceReminderRecipientResolver(user_service)
-        # Один маппер на всё приложение: он нормализует ошибки Telegram API
-        # и решает, нужно ли повторять публикацию (SPEC-021).
-        error_mapper = TelegramErrorMapper()
-        telegram_publisher = TelegramChannelPublisher(photo_sender, error_mapper=error_mapper)
+        telegram_client = BotTelegramClient(bot)
         reminder_publisher = ReminderPublisher(
-            reminder_sender, recipient_resolver, error_mapper=error_mapper
+            telegram_client=telegram_client,
+            user_repository=user_repository,
         )
-
-        publisher_resolver = DefaultPublisherResolver(
-            telegram_publisher=telegram_publisher,
+        telegram_publisher = TelegramPublisher(
+            telegram_client=telegram_client,
+            secrets=(settings.bot_token.get_secret_value(),),
+        )
+        publisher_resolver = PublisherResolver(
             reminder_publisher=reminder_publisher,
+            telegram_publisher=telegram_publisher,
         )
         publication_service = PublicationService(
             post_repository,
-            publisher_resolver,
-            # SPEC-022 §4: три повтора с задержками +30s, +2m, +10m.
-            retry_policy=RetryPolicy(),
-            error_mapper=error_mapper,
+            publisher_resolver=publisher_resolver,
         )
-
-        scheduler = SchedulerService(
-            post_repository=post_repository,
-            publication_executor=publication_service,
-        )
-        missed_post_handler = MissedPostHandler(
-            repository=post_repository,
-            publication_executor=publication_service,
-        )
-        recovery_service = RecoveryService(
-            repository=post_repository,
-            scheduler=scheduler,
-            missed_post_handler=missed_post_handler,
-        )
+        scheduler = SchedulerService(post_repository, publication_service)
         dialog_service = DialogService(
             TelebotDialogStore(bot),
             user_service=user_service,

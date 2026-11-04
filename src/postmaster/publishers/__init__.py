@@ -1,62 +1,38 @@
-"""Публикация постов на внешних площадках (BR-03)."""
+"""Публикация постов на внешних площадках (BR-03, SPEC-014, SPEC-015, SPEC-016)."""
 
-from postmaster.publishers.base import Publisher, PublishResult
-from postmaster.publishers.reminder_publisher import (
-    PhotoDataMissingError,
+from postmaster.publishers.base import (
+    BotTelegramClient,
+    Publisher,
+    PublishResult,
+    TelegramClient,
+)
+from postmaster.publishers.reminder import (
+    REMINDER_TEXT,
+    ReminderErrorCode,
     ReminderPublisher,
-    ReminderRecipientResolver,
-    TelegramBlockedError,
-    TelegramReminderSender,
-    UserNotFoundError,
 )
 from postmaster.publishers.resolver import (
-    DefaultPublisherResolver,
-    PublisherNotConfiguredError,
+    InvalidPublicationTypeError,
+    PublisherNotFoundError,
+    PublisherResolutionError,
     PublisherResolver,
-    UnknownPublicationTypeError,
+    PublisherResolverErrorCode,
 )
-from postmaster.publishers.telegram_errors import (
-    DEFAULT_ERROR_MAPPER,
-    RETRYABLE_CODES,
-    TelegramError,
-    TelegramErrorCode,
-    TelegramErrorMapper,
-)
-from postmaster.publishers.telegram_publisher import (
-    FileIdMissingError,
-    InvalidPostStatusError,
-    TargetMissingError,
-    TelegramAPIError,
-    TelegramChannelPublisher,
-    TelegramPermissionError,
-    TelegramSender,
-    TelegramTimeoutError,
-)
+from postmaster.publishers.telegram import TelegramErrorCode, TelegramPublisher
 
 __all__ = [
-    "DEFAULT_ERROR_MAPPER",
-    "DefaultPublisherResolver",
-    "FileIdMissingError",
-    "InvalidPostStatusError",
-    "PhotoDataMissingError",
-    "Publisher",
-    "PublisherNotConfiguredError",
-    "PublisherResolver",
+    "BotTelegramClient",
+    "InvalidPublicationTypeError",
     "PublishResult",
-    "RETRYABLE_CODES",
+    "Publisher",
+    "PublisherNotFoundError",
+    "PublisherResolutionError",
+    "PublisherResolver",
+    "PublisherResolverErrorCode",
+    "REMINDER_TEXT",
+    "ReminderErrorCode",
     "ReminderPublisher",
-    "ReminderRecipientResolver",
-    "TargetMissingError",
-    "TelegramAPIError",
-    "TelegramBlockedError",
-    "TelegramChannelPublisher",
-    "TelegramError",
+    "TelegramClient",
     "TelegramErrorCode",
-    "TelegramErrorMapper",
-    "TelegramPermissionError",
-    "TelegramReminderSender",
-    "TelegramSender",
-    "TelegramTimeoutError",
-    "UnknownPublicationTypeError",
-    "UserNotFoundError",
+    "TelegramPublisher",
 ]

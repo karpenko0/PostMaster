@@ -2,102 +2,52 @@
 
 ## Объём и результат
 
-Проверена реализация `TelegramChannelPublisher`: валидация preconditions, отправка
-photo+caption в target_id, обработка permission/timeout ошибок Telegram API. Полный
-прогон на Python 3.14.6: **448 passed**, 1 skipped. `ruff check .`, `ruff format --check .`
-— успешно.
+Проверена реализация `TelegramPublisher`, перечисления `TelegramErrorCode` (`ERR-015-01 … ERR-015-10`), контракта `TelegramClient` (`chat_id: str | int`), интеграции с `PublicationService` и `SchedulerService`, а также сквозных сценариев автопубликации в Telegram-канал через `FakeTelegram`.
 
-Исходный текст SPEC-015: `docs/specs/SPEC-015-telegram-publisher.md`.
+Полный прогон на Python 3.12.11: **425 passed**, без падений и пропусков. `ruff check .`, `ruff format --check .`, `git diff --check` — чисто.
 
-## Матрица приёмки
+Контроль чувствительности: 8 мутаций M1–M8 (отключение проверки `publication_type == TELEGRAM`, отключение проверки `status == PROCESSING`, пропуск проверки `target_id`, пропуск проверки `telegram_file_id`, игнорирование `caption`, пометка ошибки прав как `retryable=True`, пометка таймаута как `retryable=False`, подмена `INVALID_FILE_ID` на `TELEGRAM_TARGET_UNAVAILABLE`) обнаружены тестами `tests/test_spec015.py`.
 
-| Проверяемый критерий | Доказательство | Вывод |
+## Матрица приёмки (AC-015-01 … AC-015-15)
+
+| Критерий | Проверка | Статус |
 |---|---|---|
-| Публикует photo+caption в target_id через Telegram Bot API | `test_telegram_publisher_success`, `test_telegram_publisher_without_caption` | ✅ `send_photo` с caption=None или caption |
-| Требует PROCESSING | `test_telegram_publisher_requires_processing_status`, `test_telegram_publisher_published_status_rejected` | ✅ `InvalidPostStatusError` |
-| Требует target_id | `test_telegram_publisher_target_missing`, `test_telegram_publisher_target_whitespace_missing` | ✅ `TargetMissingError` |
-| Требует file_id | `test_telegram_publisher_file_id_missing`, `test_telegram_publisher_file_id_whitespace_missing` | ✅ `FileIdMissingError` |
-| Бот имеет право публикации | `test_telegram_publisher_permission_chat_not_found`, `test_telegram_publisher_permission_bot_kicked`, `test_telegram_publisher_permission_not_admin`, `test_telegram_publisher_permission_chat_deactivated` | ✅ 400/403 с permission-текстом → `TelegramPermissionError` |
-| Publisher не управляет Scheduler | `test_telegram_publisher_does_not_manage_retry` | ✅ Нет вызовов Scheduler в коде Publisher'а |
-| Publisher не управляет retry | `test_telegram_publisher_does_not_manage_retry` | ✅ Одна попытка, ошибка пробрасывается |
-| Publisher не управляет status | `test_telegram_publisher_does_not_manage_status` | ✅ Статус остаётся PROCESSING после успеха |
+| AC-015-01 — `publication_type=TELEGRAM`, `status=PROCESSING` запускает flow | `test_tc_015_01_successful_publish_sends_photo_to_target_without_local_files` | ✅ |
+| AC-015-02 — автоматическая публикация в `target_id` | `test_tc_015_01...`, `test_e2e_59_automatic_channel_publication_from_dialog_to_published` | ✅ |
+| AC-015-03 — используется `post.telegram_file_id` | `test_tc_015_01...`, `test_it_015_01_02_03_04_database_post_and_status_ownership` | ✅ |
+| AC-015-04 — локальный файл не требуется | `test_tc_015_01...` (`list(tmp_path.iterdir()) == []`) | ✅ |
+| AC-015-05 — передача `caption`, если он заполнен | `test_tc_015_02_caption_is_passed_to_send_photo`, `test_it_015_01_02_03_04...` | ✅ |
+| AC-015-06 — публикация без `caption` при `caption=None` | `test_tc_015_03_no_caption_sends_photo_without_caption` | ✅ |
+| AC-015-07 — `target_id=None` → API не вызывается, `TARGET_REQUIRED` | `test_tc_015_04_missing_target_returns_target_required_without_calling_api` | ✅ |
+| AC-015-08 — `telegram_file_id=None` → `FILE_ID_MISSING` | `test_tc_015_05_missing_file_returns_file_id_missing_without_calling_api` | ✅ |
+| AC-015-09 — `publication_type=REMINDER` → API не вызывается, `INVALID_PUBLICATION_TYPE` | `test_tc_015_06_wrong_type_does_not_call_telegram` | ✅ |
+| AC-015-10 — `status != PROCESSING` → `INVALID_POST_STATUS` | `test_tc_015_07_wrong_status_rejects_direct_publication` | ✅ |
+| AC-015-11 — ошибка прав бота → `success=False`, `TELEGRAM_PERMISSION_DENIED` | `test_unit_52_permission_denied_returns_telegram_permission_denied`, `test_e2e_62_bot_lost_permissions_marks_failed_and_never_published` | ✅ |
+| AC-015-12 — недоступный канал → `success=False`, `TELEGRAM_TARGET_UNAVAILABLE` | `test_unit_54_invalid_file_id_and_target_unavailable_errors`, `test_e2e_63_invalid_target_channel_marks_failed` | ✅ |
+| AC-015-13 — таймаут API возвращается как ошибка (`TELEGRAM_API_TIMEOUT`, `retryable=True`) | `test_unit_53_timeout_and_network_errors_are_marked_retryable`, `test_it_015_57_publication_service_handles_permission_and_timeout_errors` | ✅ |
+| AC-015-14 — успешная отправка → `PublishResult(success=True)` | `test_tc_015_01...`, `test_it_015_56...` | ✅ |
+| AC-015-15 — финальный статус меняется только в `PublicationService` | `test_it_015_01_02_03_04_database_post_and_status_ownership` | ✅ |
 
-## Обязательные проверки §8
+## Сверка тестов, ошибок, правил и инвариантов (§34–65)
 
-| Проверка | Тест | Статус |
+| Раздел SPEC-015 | Доказательство | Статус |
 |---|---|---|
-| success | `test_telegram_publisher_success`, `test_telegram_publisher_returns_publish_result_with_external_id` | ✅ |
-| caption | `test_telegram_publisher_success`, `test_telegram_publisher_without_caption` | ✅ |
-| target missing | `test_telegram_publisher_target_missing`, `test_telegram_publisher_target_whitespace_missing` | ✅ |
-| file missing | `test_telegram_publisher_file_id_missing`, `test_telegram_publisher_file_id_whitespace_missing` | ✅ |
-| permission | 4 теста permission (chat not found, bot kicked, not admin, chat deactivated) | ✅ |
-| timeout | `test_telegram_publisher_timeout_via_timeout_error`, `test_telegram_publisher_timeout_via_text` | ✅ |
+| §34–38 Коды ошибок `ERR-015-01…10` | `test_telegram_publisher_contracts_and_spec015_error_codes`, `test_tc_015_04…07`, `test_unit_52…54` | ✅ |
+| §46–49 Логирование и маскировка секретов | `test_tc_015_01...`, `test_tc_015_02...`, `test_unit_53...` | ✅ |
+| §51–54 Unit Tests `TC-015-01…07`, permission, timeout, invalid `file_id` | `test_tc_015_01…07`, `test_unit_52…54` | ✅ |
+| §55–58 Integration Tests `IT-015-01…04`, `PublicationService`, ошибки, `SPEC-013` | `test_it_015_01_02_03_04...`, `test_it_015_56...`, `test_it_015_57...`, `test_it_015_58...` | ✅ |
+| §59–63 E2E-сценарии (автопубликация, Recovery, Missed Job, потеря прав, invalid target) | `test_e2e_59...`, `test_e2e_60...`, `test_e2e_61...`, `test_e2e_62...`, `test_e2e_63...` | ✅ |
+| §64 Инварианты `INV-015-01…09` | Подтверждены модульными, интеграционными и сквозными тестами | ✅ |
 
-## Решения по реализации
+## Границы scope (§4)
 
-| # | Решение | Обоснование |
-|---|---|---|
-| D1 | `_validate_post()` вызывается до `send_photo` | §1 SPEC-015: «требует PROCESSING, target_id и file_id» — все три проверки до отправки |
-| D2 | `InvalidPostStatusError` (а не ValueError) | Различаем «нет прав на публикацию в канал» и «нельзя публиковать пост в этом статусе» |
-| D3 | `TargetMissingError`, `FileIdMissingError` — отдельные исключения | §8 SPEC-015 «target/file missing» — разные причины |
-| D4 | `_PERMISSION_ERROR_CODES = {400, 403}` + текстовые подстроки | Telegram API возвращает 400/403 для permission-ошибок; тексты помогают отделить от других 400 |
-| D5 | `TelegramTimeoutError` для `TimeoutError` и текста «timeout» | §8 SPEC-015 «timeout» — специфический класс ошибки |
-| D6 | Не-403/не-timeout ошибки пробрасываются без обёртки | §6 SPEC-015: «ошибка передаётся через общий error flow» |
-| D7 | Publisher не делает retry и не меняет статус | §7 SPEC-015: «Publisher не управляет Scheduler/retry/status» |
+- Единый резолвер / абстракция `Publisher` (SPEC-016), ввод `caption` пользователем в диалоге (SPEC-020) и полноценное расписание повторных попыток (SPEC-022) не входят в scope SPEC-015.
 
-## Сценарии
-
-### Happy path
-
-```
-TelegramChannelPublisher.publish(post):
-1. _validate_post(post):
-   - status == PROCESSING
-   - target_id непустой
-   - telegram_file_id непустой
-2. send_photo(chat_id=target_id, photo_file_id, caption)
-3. return PublishResult(post_id, external_id=message_id)
-```
-
-### Permission denied
-
-```
-Telegram API: 400 "Bad Request: chat not found"
-→ _is_permission_error(exc) == True (400 + 'chat not found')
-→ raise TelegramPermissionError(...)
-```
-
-### Timeout
-
-```
-asyncio.TimeoutError
-→ _is_timeout(exc) == True
-→ raise TelegramTimeoutError(...)
-```
-
-### Invalid post
-
-```
-post.status == PENDING
-→ _validate_post: InvalidPostStatusError
-```
-
-## Ограничения scope
-
-- `_is_permission_error` использует эвристику по кодам и текстам. Точное определение
-  зависит от версии Telegram Bot API. Если Telegram добавит новые тексты ошибок,
-  может потребоваться обновление списков.
-- Publisher не валидирует формат target_id (например, что это `-100...` число).
-  Это ответственность конфигурации (SPEC-026).
-- `ProcessPool` через claim_for_processing гарантирует, что Publisher получает только
-  посты в PROCESSING. Если кто-то вызовет Publisher напрямую с PENDING постом,
-  валидация D1 заблокирует отправку.
-
-## Команды
+## Команды проверки
 
 ```bash
-python -m pytest tests/test_spec015.py -v -p no:cacheprovider
-python -m pytest -q -p no:cacheprovider
-python -m ruff check .
-python -m ruff format --check .
+/tmp/venv312/bin/python -m pytest -q -p no:cacheprovider
+/tmp/venv312/bin/ruff check .
+/tmp/venv312/bin/ruff format --check .
+git diff --check
 ```

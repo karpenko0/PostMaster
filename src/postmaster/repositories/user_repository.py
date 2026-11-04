@@ -20,6 +20,12 @@ class UserRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
+    async def get_by_id(self, user_id: int) -> User | None:
+        """Возвращает пользователя по внутреннему users.id или None (SPEC-014 §21–22)."""
+        async with self._session_factory() as session:
+            model = await session.get(UserModel, user_id)
+        return None if model is None else _to_domain(model)
+
     async def find_by_telegram_id(self, telegram_user_id: int) -> User | None:
         """Возвращает пользователя или None, если его нет."""
         async with self._session_factory() as session:

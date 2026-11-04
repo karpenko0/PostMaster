@@ -2,105 +2,34 @@
 
 ## Объём и результат
 
-Проверена абстракция Publisher: единый интерфейс `publish(post) -> PublishResult`,
-протокол `PublisherResolver` для выбора Publisher по типу публикации, и decoupling
-Scheduler/Recovery/MissedJob от конкретных реализаций. Полный прогон на Python 3.14.6:
-**470 passed**, 1 skipped. `ruff check .`, `ruff format --check .` — успешно.
+Проверена реализация единого контракта `Publisher` (`publish(post) -> PublishResult`), компонента `PublisherResolver`, ошибок `PUBLISHER_NOT_FOUND` (`ERR-016-01`) и `INVALID_PUBLICATION_TYPE` (`ERR-016-02`), интеграции с `PublicationService`, `SchedulerService` и `Application.from_settings`, а также расширяемости для будущих площадок (`VKPublisher`).
 
-Исходный текст SPEC-016: `docs/specs/SPEC-016-абстракция-publisher.md`.
+Полный прогон тестов: **439 passed** (`15 passed` в `tests/test_spec016.py`). `ruff check .`, `ruff format --check .`, `git diff --check` — чисто.
 
-## Матрица приёмки
+Контроль чувствительности: 6 мутаций M1–M6 (подмена маппинга `REMINDER`/`TELEGRAM`, пропуск проверки пустого типа, возврат чужого `Publisher` вместо `PublisherNotFoundError`, вызов `mark_published` при `PublishResult(success=False)`) обнаружены тестами `tests/test_spec016.py`.
 
-| Проверяемый критерий | Доказательство | Вывод |
+## Матрица приёмки (AC-016-01 … AC-016-09)
+
+| Критерий | Проверка | Статус |
 |---|---|---|
-| Единый интерфейс `publish(post) -> PublishResult` | `test_publisher_is_abstract`, `test_publish_result_is_dataclass`, `test_concrete_publishers_return_publish_result` | ✅ `Publisher` (ABC) + `PublishResult` (dataclass) |
-| PublisherResolver: REMINDER → ReminderPublisher | `test_resolver_routes_reminder_to_reminder_publisher` | ✅ `DefaultPublisherResolver.resolve(REMINDER)` |
-| PublisherResolver: TELEGRAM → TelegramPublisher | `test_resolver_routes_telegram_to_telegram_publisher` | ✅ `DefaultPublisherResolver.resolve(TELEGRAM)` |
-| Scheduler/Recovery/MissedJob не знают concrete Publisher | `test_scheduler_uses_publication_executor_protocol`, `test_recovery_uses_missed_post_gateway_protocol`, `test_missed_post_handler_uses_publication_executor_protocol` | ✅ Используют протоколы `PublicationExecutor`, `MissedPostGateway` |
-| Неизвестный type не публикуется | `test_resolver_unknown_type_rejected`, `test_publication_service_unknown_type_marks_failed` | ✅ `UnknownPublicationTypeError` → пост в FAILED |
+| AC-016-01 — `ReminderPublisher` и `TelegramPublisher` реализуют `publish(post) -> PublishResult` | `test_tc_016_04_both_publishers_implement_unified_publish_contract` | ✅ |
+| AC-016-02 — для `REMINDER` `PublisherResolver` возвращает `ReminderPublisher` | `test_tc_016_01_02_resolver_returns_registered_reminder_and_telegram_publishers` | ✅ |
+| AC-016-03 — для `TELEGRAM` `PublisherResolver` возвращает `TelegramPublisher` | `test_tc_016_01_02_resolver_returns_registered_reminder_and_telegram_publishers` | ✅ |
+| AC-016-04 — неизвестный тип не приводит к вызову `Publisher` | `test_tc_016_03_unknown_type_raises_publisher_not_found_and_logs_error`, `test_publication_service_calls_mark_published_on_success_and_error_flow_on_failure` | ✅ |
+| AC-016-05 — `Scheduler` вызывает `PublicationService`, а не конкретный `Publisher` | `test_it_016_01_02_03_and_vk_extensibility_without_scheduler_changes`, `tests/test_architecture.py` | ✅ |
+| AC-016-06 — `Recovery` и `MissedJobService` не зависят от конкретной реализации `Publisher` | `test_it_016_01_02_03_and_vk_extensibility_without_scheduler_changes` | ✅ |
+| AC-016-07 — все `Publisher` возвращают единый `PublishResult` | `test_tc_016_04_both_publishers_implement_unified_publish_contract` | ✅ |
+| AC-016-08 — финальный статус обновляется в `PublicationService` | `test_publication_service_calls_mark_published_on_success_and_error_flow_on_failure` | ✅ |
+| AC-016-09 — добавление нового `Publisher` (`VKPublisher`) не требует изменения `Scheduler` | `test_it_016_01_02_03_and_vk_extensibility_without_scheduler_changes` | ✅ |
 
-## Обязательные проверки §8
+## Сверка тестов, ошибок, правил и инвариантов (§17–29)
 
-| Проверка | Тест | Статус |
+| Раздел SPEC-016 | Доказательство | Статус |
 |---|---|---|
-| resolver reminder | `test_resolver_routes_reminder_to_reminder_publisher` | ✅ |
-| resolver telegram | `test_resolver_routes_telegram_to_telegram_publisher` | ✅ |
-| resolver unknown | `test_resolver_unknown_type_rejected`, `test_resolver_unknown_publication_type_keeps_post_safe` | ✅ |
-| service success | `test_publication_service_uses_resolver_to_route_reminder`, `test_publication_service_uses_resolver_to_route_telegram`, `test_publication_service_routes_valid_type_after_resolver_update` | ✅ |
-| service failure | `test_publication_service_unknown_type_marks_failed`, `test_publication_service_publisher_not_configured_marks_failed` | ✅ |
-
-## Решения по реализации
-
-| # | Решение | Обоснование |
-|---|---|---|
-| D1 | `Publisher` и `PublishResult` живут в `publishers/base.py` | SPEC-016 §1: «Единый интерфейс publish(post)->PublishResult» — это контракт слоя publishers |
-| D2 | `PublisherResolver` перенесён из `services/publication_service.py` в `publishers/resolver.py` | Резолвер выбирает Publisher — это часть абстракции publishers, а не services |
-| D3 | Типизированные исключения `UnknownPublicationTypeError` и `PublisherNotConfiguredError` | SPEC-016 §7: «неизвестный type не публикуется» — разные причины отказа требуют разных исключений |
-| D4 | `UnknownPublicationTypeError` хранит `publication_type` для диагностики | Тесты и логирование получают конкретное значение |
-| D5 | PublicationService ловит только новые исключения, а не общий `PublicationError` | Старый код использовал `PublicationError` как generic — теперь каждое исключение имеет конкретный тип |
-| D6 | Scheduler/Recovery/MissedJob используют протоколы, не concrete classes | SPEC-016 §7: decoupling через structural typing (Protocol) |
-| D7 | `PublisherNotConfiguredError` — отдельный класс от `UnknownPublicationTypeError` | Различаем «тип не поддерживается» (навсегда) и «publisher не зарегистрирован» (конфигурация) |
-
-## Сценарии
-
-### Happy path
-
-```
-PublicationService.publish(post_id):
-1. claim_for_processing(post_id) → Post(status=PROCESSING)
-2. resolver.resolve(post.publication_type) → Publisher
-3. Publisher.publish(post) → PublishResult
-4. update_status(PUBLISHED, published_at=now)
-```
-
-### Unknown type
-
-```
-PublicationService.publish(post_id):
-1. claim_for_processing(post_id) → Post(status=PROCESSING)
-2. resolver.resolve(post.publication_type) → UnknownPublicationTypeError
-3. _mark_failed(post_id, "неизвестный тип публикации: VK")
-4. raise PublicationError(post_id, ...)
-```
-
-### Publisher not configured
-
-```
-PublicationService.publish(post_id):
-1. claim_for_processing(post_id) → Post(status=PROCESSING)
-2. resolver.resolve(PublicationType.TELEGRAM)
-   → PublisherNotConfiguredError (telegram_publisher=None)
-3. _mark_failed(post_id, "publisher для типа TELEGRAM не настроен")
-4. raise PublicationError(post_id, ...)
-```
-
-### Scheduler doesn't know about Publishers
-
-```
-SchedulerService._on_post_due(post_id):
-1. post = await post_repository.get_by_id(post_id)
-2. if post.status != PENDING: return
-3. await publication_executor.publish(post_id)
-```
-
-Scheduler не импортирует конкретные классы Publisher, только протокол PublicationExecutor.
-
-## Ограничения scope
-
-- DefaultPublisherResolver — единственная реализация. Альтернативы (например, динамическая
-  регистрация через entry points) — вне scope MVP.
-- Проверка на «неизвестный тип» через `PublicationType` enum: пока что в БД стоит
-  CHECK constraint, который запрещает строки вне enum. Но резолвер защищает от
-  случая расширения enum без обновления резолвера.
-- `PublisherNotConfiguredError` валится в `PublicationError` в PublicationService.
-  Это сознательное решение — приложение единообразно реагирует на любую ошибку
-  публикации (FAILED + лог).
-
-## Команды
-
-```bash
-python -m pytest tests/test_spec016.py -v -p no:cacheprovider
-python -m pytest -q -p no:cacheprovider
-python -m ruff check .
-python -m ruff format --check .
-```
+| §21 `ERR-016-01` (`PUBLISHER_NOT_FOUND`), `ERR-016-02` (`INVALID_PUBLICATION_TYPE`) | `test_tc_016_03_unknown_type_raises_publisher_not_found_and_logs_error`, `test_err_016_02_invalid_publication_type_raises_invalid_publication_type` | ✅ |
+| §22 Логирование `Publisher resolved` и `Publisher not found` | `test_tc_016_01_02...`, `test_tc_016_03...`, `test_err_016_02...` | ✅ |
+| §24 Unit Tests `TC-016-01…04` | `test_tc_016_01_02...`, `test_tc_016_03...`, `test_tc_016_04...` | ✅ |
+| §25 `PublicationService` Tests (`mark_published` и error flow) | `test_publication_service_calls_mark_published_on_success_and_error_flow_on_failure` | ✅ |
+| §26 Integration Tests `IT-016-01…03` | `test_it_016_01_02_03_and_vk_extensibility_without_scheduler_changes` | ✅ |
+| §27 E2E-сценарий (`REMINDER` и `TELEGRAM`) | `test_e2e_27_scheduler_to_resolver_to_publisher_for_reminder_and_telegram` | ✅ |
+| §28 Инварианты `INV-016-01…05` | Подтверждены модульными, интеграционными и сквозными тестами | ✅ |

@@ -1,75 +1,119 @@
-"""PublisherResolver: выбор Publisher по типу публикации (SPEC-016).
+"""PublisherResolver: выбор реализации Publisher по publication_type (SPEC-016).
 
-Сервисы (PublicationService, Scheduler, Recovery, MissedPostHandler) знают только
-протокол PublisherResolver — конкретные реализации Publisher скрыты за ним.
-
-DefaultPublisherResolver маршрутизирует REMINDER → ReminderPublisher,
-TELEGRAM → TelegramChannelPublisher. Неизвестный тип или ненастроенный
-publisher приводят к типизированным исключениям — пост НЕ публикуется.
+Позволяет PublicationService, Scheduler, Recovery и MissedJobService не зависеть
+от конкретного способа доставки (ReminderPublisher, TelegramPublisher, в будущем VKPublisher).
+Экземпляры Publisher передаются через DI при создании приложения (§16) и не пересоздаются
+на каждый вызов resolve().
 """
 
-from typing import Protocol
+import logging
+from collections.abc import Mapping
+from enum import Enum, StrEnum
+from typing import Any
 
 from postmaster.domain.post import PublicationType
 from postmaster.publishers.base import Publisher
 
-
-class PublisherResolver(Protocol):
-    """Порт выбора Publisher по типу публикации (SPEC-016 §1, §4)."""
-
-    def resolve(self, publication_type: PublicationType) -> Publisher:
-        """Возвращает Publisher для данного типа публикации.
-
-        Raises:
-            UnknownPublicationTypeError: publication_type не поддерживается.
-            PublisherNotConfiguredError: publisher для типа не зарегистрирован.
-        """
-        ...
+logger = logging.getLogger(__name__)
 
 
-class UnknownPublicationTypeError(Exception):
-    """Тип публикации не поддерживается ни одним Publisher (SPEC-016 §7)."""
+class PublisherResolverErrorCode(StrEnum):
+    """Коды ошибок выбора Publisher (SPEC-016 §12, §21)."""
 
-    def __init__(self, publication_type: object) -> None:
-        self.publication_type = publication_type
-        super().__init__(f"неизвестный тип публикации: {publication_type}")
-
-
-class PublisherNotConfiguredError(Exception):
-    """Publisher для запрошенного типа не зарегистрирован в резолвере."""
-
-    def __init__(self, publication_type: PublicationType) -> None:
-        self.publication_type = publication_type
-        super().__init__(f"publisher для типа {publication_type.value} не настроен")
+    PUBLISHER_NOT_FOUND = "PUBLISHER_NOT_FOUND"
+    INVALID_PUBLICATION_TYPE = "INVALID_PUBLICATION_TYPE"
 
 
-class DefaultPublisherResolver:
-    """Стандартный резолвер: маршрутизирует типы публикаций к Publisher'ам (SPEC-016).
+class PublisherResolutionError(Exception):
+    """Базовое исключение ошибки выбора Publisher (SPEC-016 §12, §21)."""
 
-    Регистрация по типу:
-    - REMINDER → reminder_publisher
-    - TELEGRAM → telegram_publisher
+    def __init__(self, code: PublisherResolverErrorCode, message: str) -> None:
+        self.code = code.value
+        self.error_code = code.value
+        self.retryable = False
+        self.is_temporary = False
+        super().__init__(f"{code.value}: {message}")
 
-    Если Publisher не зарегистрирован, возбуждается PublisherNotConfiguredError —
-    пост НЕ публикуется.
-    """
+
+class PublisherNotFoundError(PublisherResolutionError, KeyError):
+    """Для запрошенного publication_type не зарегистрирован Publisher (ERR-016-01)."""
+
+    def __init__(self, publication_type: Any) -> None:
+        super().__init__(
+            PublisherResolverErrorCode.PUBLISHER_NOT_FOUND,
+            f"Publisher для типа {publication_type!r} не зарегистрирован",
+        )
+
+
+class InvalidPublicationTypeError(PublisherResolutionError, ValueError):
+    """Получен некорректный или неподдерживаемый тип публикации (ERR-016-02)."""
+
+    def __init__(self, publication_type: Any) -> None:
+        super().__init__(
+            PublisherResolverErrorCode.INVALID_PUBLICATION_TYPE,
+            f"Некорректный тип публикации: {publication_type!r}",
+        )
+
+
+def _normalize_publication_type(publication_type: Any) -> str:
+    raw = publication_type.value if isinstance(publication_type, Enum) else publication_type
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip().upper()
+    raise InvalidPublicationTypeError(publication_type)
+
+
+class PublisherResolver:
+    """Сопоставляет publication_type конкретной реализации Publisher (SPEC-016 §10–12)."""
 
     def __init__(
         self,
+        reminder_publisher: Publisher | Mapping[Any, Publisher] | None = None,
         telegram_publisher: Publisher | None = None,
-        reminder_publisher: Publisher | None = None,
+        *,
+        publishers: Mapping[Any, Publisher] | None = None,
     ) -> None:
-        self._telegram = telegram_publisher
-        self._reminder = reminder_publisher
+        self._publishers: dict[str, Publisher] = {}
+        if isinstance(reminder_publisher, Mapping):
+            for key, value in reminder_publisher.items():
+                self.register(key, value)
+        elif reminder_publisher is not None:
+            self.register(PublicationType.REMINDER, reminder_publisher)
+        if telegram_publisher is not None:
+            self.register(PublicationType.TELEGRAM, telegram_publisher)
+        if publishers is not None:
+            for key, value in publishers.items():
+                self.register(key, value)
 
-    def resolve(self, publication_type: PublicationType) -> Publisher:
-        """Возвращает Publisher для типа публикации или возбуждает исключение."""
-        if publication_type == PublicationType.TELEGRAM:
-            if self._telegram is None:
-                raise PublisherNotConfiguredError(publication_type)
-            return self._telegram
-        if publication_type == PublicationType.REMINDER:
-            if self._reminder is None:
-                raise PublisherNotConfiguredError(publication_type)
-            return self._reminder
-        raise UnknownPublicationTypeError(publication_type)
+    def register(self, publication_type: Any, publisher: Publisher) -> None:
+        """Регистрирует Publisher для указанного типа публикации (REMINDER, TELEGRAM, VK)."""
+        key = _normalize_publication_type(publication_type)
+        self._publishers[key] = publisher
+
+    def resolve(
+        self,
+        publication_type: Any,
+        *,
+        post_id: int | None = None,
+    ) -> Publisher:
+        """Возвращает зарегистрированный Publisher по publication_type (SPEC-016 §10–12, §22)."""
+        try:
+            key = _normalize_publication_type(publication_type)
+        except InvalidPublicationTypeError:
+            logger.error(
+                "Publisher not found post_id=%s publication_type=%s",
+                post_id,
+                publication_type,
+            )
+            raise
+
+        publisher = self._publishers.get(key)
+        if publisher is None:
+            logger.error(
+                "Publisher not found post_id=%s publication_type=%s",
+                post_id,
+                key,
+            )
+            raise PublisherNotFoundError(key)
+
+        logger.info("Publisher resolved post_id=%s type=%s", post_id, key)
+        return publisher
