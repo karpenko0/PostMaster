@@ -38,6 +38,9 @@ cp .env.example .env
 | `DEFAULT_TIMEZONE` | нет     | `Europe/Moscow`                                  | Часовой пояс в формате IANA, например `Europe/Moscow`. Действует, пока пользователь не задал свой (SPEC-002) |
 | `POST_MODE` | нет | `REMINDER` | Тип публикаций текущего бота: `REMINDER` или `TELEGRAM` (SPEC-009) |
 | `TELEGRAM_TARGET_ID` | для `POST_MODE=TELEGRAM` | — | ID канала назначения, например `-1001234567890` |
+| `HEALTH_FILE` | нет | `data/health.json` | Путь к JSON-отчёту health check (SPEC-029) |
+| `HEALTH_MAX_AGE_SECONDS` | нет | `90` | Максимальный возраст отчёта, после которого он считается устаревшим |
+| `BACKUP_PATH` | нет | `data/backup.db` | Путь к файлу резервной копии SQLite (SPEC-030) |
 
 Переменные окружения имеют приоритет над файлом `.env`. Файл `.env` не попадает в Git и в образ Docker.
 
@@ -66,6 +69,11 @@ docker compose down
 ```bash
 mkdir -p data && sudo chown -R 1000:1000 data
 ```
+
+В `docker-compose.yml` настроен `HEALTHCHECK` (SPEC-029): каждые 30 секунд выполняется
+`python -m postmaster health`, который читает JSON-отчёт из `data/health.json`,
+написанный работающим приложением. Docker помечает контейнер `unhealthy`, если
+приложение зависло, БД недоступна или Scheduler остановлен.
 
 ## Команды бота
 
@@ -123,9 +131,47 @@ mkdir -p data && sudo chown -R 1000:1000 data
 
 | Код | Значение                                                                 |
 |-----|--------------------------------------------------------------------------|
-| 0   | Штатная остановка по `SIGINT` или `SIGTERM`                              |
-| 1   | Ошибка запуска или работы: токен отклонён, нет связи с Telegram, БД недоступна |
+| 0   | Штатная остановка по `SIGINT` или `SIGTERM`. Для `python -m postmaster health` — отчёт healthy |
+| 1   | Ошибка запуска или работы: токен отклонён, нет связи с Telegram, БД недоступна. Для `python -m postmaster health` — отчёт unhealthy, устарел, повреждён или отсутствует |
 | 2   | Ошибка конфигурации: неверный `BOT_TOKEN`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `POST_MODE` или не заданный для TELEGRAM `TELEGRAM_TARGET_ID` |
+
+## Health check (SPEC-029)
+
+```bash
+python -m postmaster health
+# код 0 → healthy
+# код 1 → unhealthy / отчёт устарел / повреждён / отсутствует
+# код 2 → ошибка конфигурации
+
+# С флагами:
+python -m postmaster health --print           # печатает JSON-отчёт
+python -m postmaster health --health-file path/to/report.json
+python -m postmaster health --max-age-seconds 60
+```
+
+Проверяет три индикатора: ``process`` (всегда ok в живом процессе),
+``database`` (``SELECT 1`` через SQLAlchemy), ``scheduler``
+(``SchedulerService.running``). Отчёт атомарно пишется в `HEALTH_FILE`
+каждые 30 секунд; не содержит секретов, паролей БД и пользовательских
+данных.
+
+## Резервное копирование SQLite (SPEC-030)
+
+```bash
+python -m postmaster backup
+# код 0 → backup создан и проверен
+# код 1 → ошибка backup
+# код 2 → ошибка конфигурации
+
+# С флагами:
+python -m postmaster backup --source /path/to/db.sqlite
+python -m postmaster backup --destination /var/backups/postmaster.db
+```
+
+Создаёт резервную копию SQLite через Online Backup API и проверяет её
+целостность (`PRAGMA integrity_check`). Активная БД не меняется,
+`.env` не включается (это файл SQLite, секреты хранятся отдельно).
+Поддерживается только для `DATABASE_URL` с SQLite.
 
 ## Архитектура
 

@@ -13,6 +13,7 @@ from telebot.types import Message
 
 from postmaster.services.dialog_service import DialogService
 from postmaster.services.user_service import UserService
+from postmaster.utils.logging_config import EVENT_COMMAND_FAILED, EVENT_COMMAND_START, log_event
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +45,22 @@ def register_start_handler(
         except Exception as exc:
             # Ошибка SQLAlchemy может включать username/first_name в тексте и аргументах SQL.
             # Логируем только тип, не traceback и не строку исключения (ERR-007-01, §50).
-            logger.error(
-                "Не удалось зарегистрировать пользователя при /start user_id=%s error_type=%s",
-                sender.id,
-                type(exc).__name__,
+            log_event(
+                logger,
+                EVENT_COMMAND_FAILED,
+                level=logging.ERROR,
+                command="start",
+                telegram_user_id=sender.id,
+                error_type=type(exc).__name__,
             )
             await bot.send_message(message.chat.id, START_FAILED)
             return
+        log_event(
+            logger,
+            EVENT_COMMAND_START,
+            command="start",
+            telegram_user_id=sender.id,
+        )
         await bot.send_message(
             message.chat.id,
             START_GREETING.format(first_name=sender.first_name)

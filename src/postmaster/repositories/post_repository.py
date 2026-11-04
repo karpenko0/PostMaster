@@ -23,6 +23,16 @@ from postmaster.domain.post import (
     UserNotFoundError,
 )
 from postmaster.utils.clock import utc_now
+from postmaster.utils.logging_config import (
+    EVENT_CLAIM,
+    EVENT_CLAIM_SKIPPED,
+    EVENT_POST_CANCELLED,
+    EVENT_POST_CREATED,
+    EVENT_POST_FAILED,
+    EVENT_PUBLISH_OK,
+    EVENT_STATUS_CHANGED,
+    log_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,13 +119,31 @@ class PostRepository:
             session.add(model)
             await session.flush()
         post = _to_domain(model)
-        logger.info("Post created id=%s user_id=%s status=PENDING", post.id, post.user_id)
+        log_event(
+            logger,
+            EVENT_POST_CREATED,
+            post_id=post.id,
+            user_id=post.user_id,
+            status="PENDING",
+        )
         return post
 
     async def get_by_id(self, post_id: int) -> Post | None:
         """Получает запись без авторизации; для пользовательской операции проверьте владельца."""
         async with self._session_factory() as session:
             model = await session.get(PostModel, post_id)
+            return None if model is None else _to_domain(model)
+
+    async def get_user_post(self, post_id: int, user_id: int) -> Post | None:
+        """Возвращает пост только если он принадлежит user_id (SPEC-024 §1, §8).
+
+        Для пользовательских операций используйте этот метод вместо ``get_by_id``:
+        фильтрация по ``user_id`` происходит в SQL, чужие посты не возвращаются
+        и не отличаются от «не существует» (SPEC-024 §7).
+        """
+        statement = select(PostModel).where(PostModel.id == post_id, PostModel.user_id == user_id)
+        async with self._session_factory() as session:
+            model = (await session.scalars(statement)).first()
             return None if model is None else _to_domain(model)
 
     async def list_pending_by_user(self, user_id: int) -> list[Post]:
@@ -137,6 +165,38 @@ class PostRepository:
         )
         async with self._session_factory() as session:
             return [_to_domain(model) for model in (await session.scalars(statement)).all()]
+
+    async def claim_for_processing(
+        self, post_id: int, *, now: datetime | None = None
+    ) -> Post | None:
+        """Атомарно переводит PENDING → PROCESSING (SPEC-013 §1, §4).
+
+        Право на публикацию даёт только rowcount=1: если запись уже забрана другим
+        исполнителем или её статус изменился (например, отмена), метод возвращает None.
+        Одним условным UPDATE обеспечивается взаимная исключительность claim и cancel.
+        """
+        stamp = _to_storage(now if now is not None else utc_now(), "now")
+        async with self._session_factory() as session, session.begin():
+            result = await session.execute(
+                update(PostModel)
+                .where(PostModel.id == post_id, PostModel.status == PostStatus.PENDING.value)
+                .values(status=PostStatus.PROCESSING.value, updated_at=stamp)
+            )
+            if result.rowcount != 1:
+                log_event(
+                    logger,
+                    EVENT_CLAIM_SKIPPED,
+                    level=logging.INFO,
+                    post_id=post_id,
+                    reason="status_changed",
+                )
+                return None
+            model = await session.get(PostModel, post_id)
+            if model is None:
+                return None
+            post = _to_domain(model)
+        log_event(logger, EVENT_CLAIM, post_id=post_id, status="PROCESSING")
+        return post
 
     async def update_status(
         self,
@@ -181,11 +241,17 @@ class PostRepository:
             await session.refresh(model)
             post = _to_domain(model)
         if target == PostStatus.FAILED:
-            logger.error("Post failed id=%s", post_id)
+            log_event(logger, EVENT_POST_FAILED, level=logging.ERROR, post_id=post_id)
         elif target == PostStatus.PUBLISHED:
-            logger.info("Post published id=%s", post_id)
+            log_event(logger, EVENT_PUBLISH_OK, post_id=post_id)
         else:
-            logger.info("Post status changed id=%s %s->%s", post_id, old, target)
+            log_event(
+                logger,
+                EVENT_STATUS_CHANGED,
+                post_id=post_id,
+                old=old.value,
+                new=target.value,
+            )
         return post
 
     async def claim_post_for_processing(
@@ -334,6 +400,13 @@ class PostRepository:
                 .values(status=PostStatus.CANCELLED.value, updated_at=stamp)
             )
         if result.rowcount == 1:
-            logger.info("Post status changed id=%s PENDING->CANCELLED", post_id)
+            log_event(
+                logger,
+                EVENT_POST_CANCELLED,
+                post_id=post_id,
+                user_id=user_id,
+                old="PENDING",
+                new="CANCELLED",
+            )
             return True
         return False

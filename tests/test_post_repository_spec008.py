@@ -129,7 +129,11 @@ async def test_create_get_by_id_and_utc_roundtrip(db, caplog: pytest.LogCaptureF
     assert post.publication_type == PublicationType.REMINDER
     assert post.target_id is post.error_message is post.published_at is post.caption is None
     assert post.created_at == post.updated_at == CREATED
-    assert f"Post created id={post.id} user_id={user_id} status=PENDING" in caplog.text
+    # SPEC-025: структурированное событие post_created с полями post_id/user_id/status.
+    assert "event=post_created" in caplog.text
+    assert f"post_id={post.id}" in caplog.text
+    assert f"user_id={user_id}" in caplog.text
+    assert "status=PENDING" in caplog.text
     assert "AgAC..." not in caplog.text
     assert await repo.get_by_id(post.id) == post
     assert await repo.get_by_id(post.id + 100) is None

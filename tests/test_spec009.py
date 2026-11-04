@@ -194,7 +194,12 @@ async def test_confirmation_messages(repository_db) -> None:
 
 async def test_real_scheduler_creates_date_job_with_id_and_utc(repository_db) -> None:
     repo, _, user_id = repository_db
-    scheduler = SchedulerService(repo)
+
+    class _NoopExecutor:
+        async def publish(self, post_id: int) -> None:
+            return None
+
+    scheduler = SchedulerService(repo, publication_executor=_NoopExecutor())
     scheduler.start()
     try:
         post = await create(
@@ -214,7 +219,12 @@ async def test_due_job_reloads_post_by_id_instead_of_storing_object(
     repository_db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo, fake_scheduler, user_id = repository_db
-    scheduler = SchedulerService(repo)
+
+    class _NoopExecutor:
+        async def publish(self, post_id: int) -> None:
+            return None
+
+    scheduler = SchedulerService(repo, publication_executor=_NoopExecutor())
     original = repo.get_by_id
     loaded: list[int] = []
 

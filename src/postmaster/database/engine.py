@@ -8,6 +8,7 @@ from pathlib import Path
 
 from sqlalchemy import event, text
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -19,9 +20,23 @@ from sqlalchemy.ext.asyncio import (
 SQLITE_BUSY_TIMEOUT_MS = 5000
 
 
+class DatabaseUrlError(ValueError):
+    """DATABASE_URL не является корректной строкой подключения."""
+
+
 def create_database_engine(database_url: str) -> AsyncEngine:
-    """Создаёт асинхронный движок. Для SQLite создаёт каталог файла при необходимости."""
-    url = make_url(database_url)
+    """Создаёт асинхронный движок. Для SQLite создаёт каталог файла при необходимости.
+
+    Raises:
+        DatabaseUrlError: строка подключения не разбирается как SQLAlchemy URL.
+            Проверка выполняется на старте, чтобы ошибка была понятной.
+    """
+    try:
+        url = make_url(database_url)
+    except ArgumentError as exc:
+        raise DatabaseUrlError(
+            "DATABASE_URL не является корректной строкой подключения SQLAlchemy"
+        ) from exc
     is_sqlite = url.get_backend_name() == "sqlite"
     if is_sqlite:
         _ensure_sqlite_directory(url)

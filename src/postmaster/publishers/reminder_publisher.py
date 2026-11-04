@@ -1,0 +1,172 @@
+"""Публикация напоминания пользователю в личный чат (SPEC-014).
+
+ReminderPublisher отправляет владельцу поста:
+1. Текст «Время публиковать!» с локальным временем публикации.
+2. Фотографию по telegram_file_id (без скачивания на сервер).
+3. Caption, если он задан в Post.
+
+Не работает с Telegram API напрямую — только через интерфейс TelegramReminderSender.
+Возвращает PublishResult. Финальный статус (PUBLISHED) выставляет PublicationService.
+
+Ошибки Telegram API нормализуются через ``TelegramErrorMapper`` (SPEC-021):
+``BLOCKED`` → TelegramBlockedError, остальное → TelegramAPIError.
+"""
+
+import logging
+from typing import Protocol
+
+from postmaster.domain.post import Post
+from postmaster.publishers.base import Publisher, PublishResult
+from postmaster.publishers.telegram_errors import (
+    DEFAULT_ERROR_MAPPER,
+    TelegramErrorCode,
+    TelegramErrorMapper,
+)
+from postmaster.publishers.telegram_publisher import TelegramAPIError
+from postmaster.utils.logging_config import (
+    EVENT_PUBLISH_ERROR,
+    EVENT_PUBLISH_REMINDER,
+    log_event,
+)
+from postmaster.utils.timezone_format import format_local_datetime
+
+logger = logging.getLogger(__name__)
+
+
+class UserNotFoundError(Exception):
+    """Владелец поста не найден в БД (SPEC-014 §8 missing user)."""
+
+
+class PhotoDataMissingError(Exception):
+    """В посте отсутствует telegram_file_id (SPEC-014 §8 missing file)."""
+
+
+class TelegramBlockedError(Exception):
+    """Пользователь заблокировал бота — Telegram вернул 403 (SPEC-014 §8 blocked bot)."""
+
+
+class TelegramReminderSender(Protocol):
+    """Контракт отправки напоминания пользователю в личный чат.
+
+    Реализация в production-коде (BotTelegramReminderSender) может выбрасывать
+    ApiTelegramException с error_code=403 — это конвертируется в TelegramBlockedError.
+    """
+
+    async def send_message(self, *, chat_id: int, text: str) -> object | None: ...
+
+    async def send_photo(
+        self, *, chat_id: int, photo_file_id: str, caption: str | None = None
+    ) -> object | None: ...
+
+
+class ReminderRecipientResolver(Protocol):
+    """Порт получения Telegram ID получателя напоминания по внутреннему user_id."""
+
+    async def get_telegram_user_id(self, user_id: int) -> int | None: ...
+
+
+REMINDER_TEXT_TEMPLATE = "🔔 Время публиковать!\n\nЗапланированная публикация: {local_time}."
+
+
+class ReminderPublisher(Publisher):
+    """Отправляет пользователю напоминание о запланированной публикации (SPEC-014)."""
+
+    def __init__(
+        self,
+        sender: TelegramReminderSender,
+        recipient_resolver: ReminderRecipientResolver,
+        error_mapper: TelegramErrorMapper | None = None,
+    ) -> None:
+        self._sender = sender
+        self._recipients = recipient_resolver
+        self._error_mapper = error_mapper or TelegramErrorMapper()
+
+    async def publish(self, post: Post) -> PublishResult:
+        """Отправляет текст + фото пользователю-владельцу поста.
+
+        Raises:
+            PhotoDataMissingError: telegram_file_id пустой.
+            UserNotFoundError: владелец поста не найден в БД.
+            TelegramBlockedError: пользователь заблокировал бота.
+            TelegramAPIError: прочая нормализованная ошибка Telegram API (SPEC-021).
+        """
+        if not post.telegram_file_id or not post.telegram_file_id.strip():
+            raise PhotoDataMissingError("telegram_file_id обязателен для Reminder")
+
+        telegram_user_id = await self._recipients.get_telegram_user_id(post.user_id)
+        if telegram_user_id is None:
+            raise UserNotFoundError(
+                f"пользователь для напоминания не найден user_id={post.user_id}"
+            )
+
+        local_time = format_local_datetime(post.scheduled_at_utc, post.timezone)
+        text = REMINDER_TEXT_TEMPLATE.format(local_time=local_time)
+
+        try:
+            text_message = await self._sender.send_message(chat_id=telegram_user_id, text=text)
+        except Exception as exc:
+            self._handle_send_error(post, exc, what="send_message")
+
+        try:
+            photo_message = await self._sender.send_photo(
+                chat_id=telegram_user_id,
+                photo_file_id=post.telegram_file_id,
+                caption=post.caption,
+            )
+        except Exception as exc:
+            self._handle_send_error(post, exc, what="send_photo")
+
+        external_id = self._extract_message_id(photo_message) or self._extract_message_id(
+            text_message
+        )
+        log_event(
+            logger,
+            EVENT_PUBLISH_REMINDER,
+            post_id=post.id,
+            user_id=post.user_id,
+            message_id=external_id,
+        )
+        return PublishResult(post_id=post.id, external_id=external_id)
+
+    def _handle_send_error(self, post: Post, exc: Exception, *, what: str) -> None:
+        """Преобразует ошибку Telegram API в типизированное исключение (SPEC-021)."""
+        error = self._error_mapper.map_exception(exc)
+        log_event(
+            logger,
+            EVENT_PUBLISH_ERROR,
+            level=logging.WARNING,
+            post_id=post.id,
+            user_id=post.user_id,
+            what=what,
+            error_code=error.code.value,
+            retryable=error.retryable,
+        )
+        if error.code == TelegramErrorCode.BLOCKED:
+            raise TelegramBlockedError(error.message) from exc
+        raise TelegramAPIError(error) from exc
+
+    @staticmethod
+    def _extract_message_id(message: object | None) -> str | None:
+        if isinstance(message, dict):
+            value = message.get("message_id")
+            return None if value is None else str(value)
+        return None
+
+
+def _is_bot_blocked(exc: Exception) -> bool:
+    """Совместимость с SPEC-014: ошибка «бот заблокирован пользователем».
+
+    Источник истины — TelegramErrorMapper (SPEC-021).
+    """
+    return DEFAULT_ERROR_MAPPER.map_exception(exc).code == TelegramErrorCode.BLOCKED
+
+
+__all__ = [
+    "PhotoDataMissingError",
+    "REMINDER_TEXT_TEMPLATE",
+    "ReminderPublisher",
+    "ReminderRecipientResolver",
+    "TelegramBlockedError",
+    "TelegramReminderSender",
+    "UserNotFoundError",
+]

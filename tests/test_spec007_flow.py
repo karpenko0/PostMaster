@@ -82,7 +82,10 @@ async def test_failed_registration_does_not_log_personal_data_or_create_fictive_
         )
         await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
     assert fake_telegram.sent_messages[0]["text"] == START_FAILED
-    assert "Не удалось зарегистрировать пользователя" in caplog.text
+    # SPEC-025: структурированное событие command_failed с command=start и error_type.
+    assert "event=command_failed" in caplog.text
+    assert "command=start" in caplog.text
+    assert "telegram_user_id=72" in caplog.text
     assert "private_name_007" not in caplog.text
     assert users_rows(db_path(tmp_path), 72) == []
     assert await running_app.bot.get_state(72, 72) is None

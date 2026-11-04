@@ -21,5 +21,10 @@ RUN pip install . \
 
 USER postmaster
 
+# Health check (SPEC-029): читает JSON-отчёт, который пишет работающее приложение.
+# Код 0 — healthy, 1 — unhealthy (БД недоступна, Scheduler остановлен или отчёт устарел).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD ["python", "-m", "postmaster", "health"]
+
 # Логи пишутся в stdout. Остановка по SIGTERM: init в compose передаёт сигнал процессу.
 CMD ["python", "-m", "postmaster"]

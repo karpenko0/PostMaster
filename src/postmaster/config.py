@@ -1,8 +1,8 @@
-"""Настройки приложения (SPEC-001, SPEC-002, SPEC-026).
+"""Настройки приложения (SPEC-001, SPEC-002, SPEC-023, SPEC-026).
 
 Значения читаются из переменных окружения. Файл .env для локальной разработки
 загружается через python-dotenv, но переменные окружения имеют приоритет.
-Секреты не попадают ни в repr, ни в текст ошибок (SPEC-023).
+Секреты не попадают ни в repr, ни в текст ошибок (SPEC-023 §6).
 """
 
 import re
@@ -17,9 +17,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///data/postmaster.db"
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_TIMEZONE = "Europe/Moscow"
+DEFAULT_HEALTH_FILE = "data/health.json"
+DEFAULT_HEALTH_MAX_AGE_SECONDS = 90
+DEFAULT_BACKUP_PATH = "data/backup.db"
 
 # Формат токена Telegram Bot API: "<числовой id бота>:<секретная часть>".
 _TOKEN_PATTERN = re.compile(r"\d{5,}:[A-Za-z0-9_-]{20,}")
+
+# Поиск credentials в DATABASE_URL: "user:password@host". Пароль — секрет, который
+# нельзя выводить в логи или error_message (SPEC-023 §6, SPEC-027 §7).
+_URL_CREDENTIALS_PATTERN = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
@@ -52,6 +59,43 @@ class Settings(BaseSettings):
         default=None,
         description="Канал для режима TELEGRAM (TELEGRAM_TARGET_ID).",
     )
+    health_file: str = Field(
+        default=DEFAULT_HEALTH_FILE,
+        min_length=1,
+        description="Путь к файлу с отчётом health check (HEALTH_FILE).",
+    )
+    health_max_age_seconds: int = Field(
+        default=DEFAULT_HEALTH_MAX_AGE_SECONDS,
+        gt=0,
+        description="Максимальный возраст отчёта health check в секундах (HEALTH_MAX_AGE_SECONDS).",
+    )
+    backup_path: str = Field(
+        default=DEFAULT_BACKUP_PATH,
+        min_length=1,
+        description="Путь к файлу резервной копии SQLite (BACKUP_PATH).",
+    )
+
+    @property
+    def secret_values(self) -> tuple[str, ...]:
+        """Все секретные значения Settings, которые нельзя выводить в логи (SPEC-023 §4).
+
+        Включает Bot Token и пароль из DATABASE_URL, если он есть.
+        Гарантирует, что приложение редактирует все секреты единообразно —
+        централизованный источник истины для redaction.
+        """
+        values: list[str] = [self.bot_token.get_secret_value()]
+        # Если DATABASE_URL содержит user:password@... — выводим его целиком,
+        # чтобы redaction скрыла и логин, и пароль.
+        if _URL_CREDENTIALS_PATTERN.search(self.database_url):
+            values.append(self.database_url)
+        # Убираем дубликаты и пустые значения.
+        seen: set[str] = set()
+        unique: list[str] = []
+        for value in values:
+            if value and value not in seen:
+                seen.add(value)
+                unique.append(value)
+        return tuple(unique)
 
     @model_validator(mode="after")
     def _check_post_mode(self) -> "Settings":
@@ -67,6 +111,17 @@ class Settings(BaseSettings):
         if not _TOKEN_PATTERN.fullmatch(value.get_secret_value()):
             raise ValueError("не задан или имеет неверный формат")
         return value
+
+    @field_validator("database_url")
+    @classmethod
+    def _check_database_url(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("пустое значение")
+        # Синтаксис SQLAlchemy URL проверяется в слое database при создании
+        # движка — здесь только непустота, чтобы не нарушать архитектурное
+        # правило «config не импортирует sqlalchemy» (test_architecture).
+        return stripped
 
     @field_validator("default_timezone")
     @classmethod
