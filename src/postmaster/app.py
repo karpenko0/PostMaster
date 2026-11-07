@@ -20,7 +20,6 @@ from telebot.asyncio_helper import ApiTelegramException
 
 from postmaster.bot.dialog_store import TelebotDialogStore
 from postmaster.bot.factory import close_bot_session, create_bot
-from postmaster.bot.sender import BotTelegramReminderSender, BotTelegramSender
 from postmaster.bot.transport import PollingTransport, Transport
 from postmaster.config import ConfigError, Settings, load_settings
 from postmaster.database.backup import BackupError, create_backup
@@ -31,7 +30,6 @@ from postmaster.database.engine import (
 )
 from postmaster.database.health import probe_database
 from postmaster.database.schema import create_schema
-from postmaster.domain.post import PublicationType
 from postmaster.handlers.registry import register_handlers
 from postmaster.publishers.base import BotTelegramClient
 from postmaster.publishers.reminder import ReminderPublisher
@@ -47,6 +45,7 @@ from postmaster.services.my_posts_service import MyPostsService
 from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
 from postmaster.services.publication_service import PublicationService
+from postmaster.services.recovery_service import RecoveryService
 from postmaster.services.scheduler_service import SchedulerService
 from postmaster.services.user_service import UserService
 from postmaster.utils.health import (
@@ -134,12 +133,24 @@ class Application:
             publisher_resolver=publisher_resolver,
         )
         scheduler = SchedulerService(post_repository, publication_service)
+
+        # MissedPostHandler uses the older publish gateway; delegate to the same
+        # execution path as the scheduler so persisted types remain authoritative.
+        class _MissedExecutor:
+            async def publish(self, post_id: int) -> bool:
+                return await publication_service.execute(post_id)
+
+        missed_post_handler = MissedPostHandler(post_repository, _MissedExecutor())
+        recovery_service = RecoveryService(post_repository, scheduler, missed_post_handler)
         dialog_service = DialogService(
             TelebotDialogStore(bot),
             user_service=user_service,
-            post_service=PostService(post_repository, scheduler),
-            publication_type=PublicationType(settings.post_mode),
-            target_id=settings.telegram_target_id,
+            post_service=PostService(
+                post_repository,
+                scheduler,
+                telegram_target_allowlist=settings.telegram_target_allowlist,
+            ),
+            telegram_target_allowlist=settings.telegram_target_allowlist,
         )
         my_posts_service = MyPostsService(
             post_repository=post_repository,

@@ -27,6 +27,7 @@ from postmaster.domain.schedule import (
     ParsedPublicationDateTime,
     parse_publication_datetime,
 )
+from postmaster.domain.telegram_target import normalize_target, parse_allowlist
 from postmaster.services.post_service import (
     PostCreationError,
     PostCreationErrorCode,
@@ -46,6 +47,10 @@ PHOTO_WIDTH_KEY = "width"
 PHOTO_HEIGHT_KEY = "height"
 # Подпись к фото (SPEC-020): необязательная, хранится в черновике и передаётся в Post.
 CAPTION_KEY = "caption"
+PUBLICATION_TYPE_KEY = "publication_type"
+TARGET_ID_KEY = "target_id"
+REMINDER_BUTTON = "🔔 Напомнить мне"
+TELEGRAM_BUTTON = "📢 Опубликовать в Telegram"
 
 
 def _photo_draft(photo: PhotoData) -> dict[str, str]:
@@ -85,6 +90,10 @@ class DialogOutcomeKind(StrEnum):
     STARTED = "started"
     PHOTO_ACCEPTED = "photo_accepted"
     PHOTO_REPLACED = "photo_replaced"
+    TYPE_SELECTED = "type_selected"
+    TARGET_REQUESTED = "target_requested"
+    TARGET_INVALID = "target_invalid"
+    TARGET_FORBIDDEN = "target_forbidden"
     DATETIME_INVALID = "datetime_invalid"
     POST_CREATED = "post_created"
     POST_SAVED_UNSCHEDULED = "post_saved_unscheduled"
@@ -120,12 +129,13 @@ class DialogService:
         post_service: PostService,
         publication_type: PublicationType = PublicationType.REMINDER,
         target_id: str | None = None,
+        telegram_target_allowlist: str = "",
     ) -> None:
         self._store = store
         self._users = user_service
         self._posts = post_service
-        self._publication_type = publication_type
-        self._target_id = target_id
+        # Legacy defaults are intentionally not substituted for an explicit choice.
+        self._allowlist = parse_allowlist(telegram_target_allowlist)
         # Сообщения одного пользователя в одном чате обрабатываются по очереди (решение D11).
         self._locks: defaultdict[tuple[int, int], asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -157,8 +167,22 @@ class DialogService:
             ):
                 return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
             await self._store.set_state(user_id, chat_id, target)
-            await self._store.set_draft(user_id, chat_id, _photo_draft(photo))
-        if current == DialogState.WAITING_DATETIME:
+            draft = _photo_draft(photo)
+            if current in (
+                DialogState.WAITING_PUBLICATION_TYPE,
+                DialogState.WAITING_TARGET,
+                DialogState.WAITING_DATETIME,
+            ):
+                previous = await self._store.get_draft(user_id, chat_id)
+                for key in (PUBLICATION_TYPE_KEY, TARGET_ID_KEY):
+                    if key in previous:
+                        draft[key] = previous[key]
+            await self._store.set_draft(user_id, chat_id, draft)
+        if current in (
+            DialogState.WAITING_PUBLICATION_TYPE,
+            DialogState.WAITING_TARGET,
+            DialogState.WAITING_DATETIME,
+        ):
             return DialogOutcome(DialogOutcomeKind.PHOTO_REPLACED, target)
         return DialogOutcome(DialogOutcomeKind.PHOTO_ACCEPTED, target)
 
@@ -169,6 +193,40 @@ class DialogService:
         """
         async with self._locks[user_id, chat_id]:
             current = await self._current_state(user_id, chat_id)
+            if current == DialogState.WAITING_PUBLICATION_TYPE:
+                event = {
+                    REMINDER_BUTTON: DialogEvent.REMINDER,
+                    TELEGRAM_BUTTON: DialogEvent.TELEGRAM,
+                }.get(text.strip())
+                if event is None:
+                    return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
+                draft = await self._store.get_draft(user_id, chat_id)
+                draft[PUBLICATION_TYPE_KEY] = event.value
+                draft.pop(TARGET_ID_KEY, None)
+                target = next_state(current, event)
+                assert target is not None
+                await self._store.set_draft(user_id, chat_id, draft)
+                await self._store.set_state(user_id, chat_id, target)
+                kind = (
+                    DialogOutcomeKind.TYPE_SELECTED
+                    if event == DialogEvent.REMINDER
+                    else DialogOutcomeKind.TARGET_REQUESTED
+                )
+                return DialogOutcome(kind, target)
+            if current == DialogState.WAITING_TARGET:
+                try:
+                    channel = normalize_target(text)
+                except ValueError:
+                    return DialogOutcome(DialogOutcomeKind.TARGET_INVALID, current)
+                if self._allowlist and channel not in self._allowlist:
+                    return DialogOutcome(DialogOutcomeKind.TARGET_FORBIDDEN, current)
+                draft = await self._store.get_draft(user_id, chat_id)
+                draft[TARGET_ID_KEY] = channel
+                target = next_state(current, DialogEvent.VALID_TARGET)
+                assert target is not None
+                await self._store.set_draft(user_id, chat_id, draft)
+                await self._store.set_state(user_id, chat_id, target)
+                return DialogOutcome(DialogOutcomeKind.TYPE_SELECTED, target)
             target = next_state(current, DialogEvent.VALID_DATETIME)
             if target is None:
                 return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
@@ -193,8 +251,8 @@ class DialogService:
                     telegram_file_unique_id=draft.get(PHOTO_UNIQUE_ID_KEY),
                     scheduled_at_utc=parsed.utc_datetime,
                     timezone=parsed.timezone,
-                    publication_type=self._publication_type,
-                    target_id=self._target_id,
+                    publication_type=draft.get(PUBLICATION_TYPE_KEY, ""),
+                    target_id=draft.get(TARGET_ID_KEY),
                     caption=draft.get(CAPTION_KEY),
                 )
             except PostCreationError as exc:

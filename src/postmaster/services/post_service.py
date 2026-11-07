@@ -7,6 +7,7 @@ from typing import NoReturn, Protocol
 from zoneinfo import ZoneInfo
 
 from postmaster.domain.post import Post, PostDraft, PublicationType, UserNotFoundError
+from postmaster.domain.telegram_target import normalize_target, parse_allowlist
 from postmaster.repositories.post_repository import PostRepository
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,8 @@ class PostCreationErrorCode(StrEnum):
     DATETIME_MISSING = "DATETIME_MISSING"
     INVALID_PUBLICATION_TYPE = "INVALID_PUBLICATION_TYPE"
     TARGET_REQUIRED = "TARGET_REQUIRED"
+    INVALID_TARGET = "INVALID_TARGET"
+    TARGET_NOT_ALLOWED = "TARGET_NOT_ALLOWED"
     POST_CREATE_FAILED = "POST_CREATE_FAILED"
     SCHEDULER_REGISTRATION_FAILED = "SCHEDULER_REGISTRATION_FAILED"
 
@@ -52,10 +55,15 @@ class PostService:
     """Сохраняет PENDING до передачи идентификатора Scheduler (BR-009-06/07)."""
 
     def __init__(
-        self, repository: PostRepository | None = None, scheduler: PostScheduler | None = None
+        self,
+        repository: PostRepository | None = None,
+        scheduler: PostScheduler | None = None,
+        *,
+        telegram_target_allowlist: str = "",
     ) -> None:
         self._repository = repository
         self._scheduler = scheduler
+        self._allowlist = parse_allowlist(telegram_target_allowlist)
 
     async def create_post(
         self,
@@ -113,6 +121,16 @@ class PostService:
             _reject(PostCreationErrorCode.INVALID_PUBLICATION_TYPE, user_id)
         if kind == PublicationType.TELEGRAM and (not target_id or not target_id.strip()):
             _reject(PostCreationErrorCode.TARGET_REQUIRED, user_id)
+        if kind == PublicationType.REMINDER:
+            if target_id is not None:
+                _reject(PostCreationErrorCode.INVALID_TARGET, user_id)
+        else:
+            try:
+                target_id = normalize_target(target_id or "")
+            except ValueError:
+                _reject(PostCreationErrorCode.INVALID_TARGET, user_id)
+            if self._allowlist and target_id not in self._allowlist:
+                _reject(PostCreationErrorCode.TARGET_NOT_ALLOWED, user_id)
         try:
             post = await self._repository.create_post(
                 user_id=user_id,

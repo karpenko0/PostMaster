@@ -14,8 +14,8 @@ PostMaster — Telegram-бот, который:
 - принимает фотографию от пользователя в личном чате;
 - запрашивает дату и время публикации в формате `ДД.ММ.ГГГГ ЧЧ:ММ`;
 - хранит данные в SQLite (`data/postmaster.db`);
-- по расписанию публикует фото в Telegram-канал (`POST_MODE=TELEGRAM`)
-  или отправляет напоминание пользователю (`POST_MODE=REMINDER`);
+- по расписанию публикует фото в выбранный Telegram-канал
+  или отправляет напоминание пользователю; режим выбирается для каждого поста;
 - восстанавливает задания после перезапуска и поддерживает повторные попытки.
 
 Реализованы Long Polling и встроенный health-check. Файлы изображений
@@ -64,7 +64,7 @@ PostMaster — Telegram-бот, который:
 
 - Токен Telegram-бота, выданный **@BotFather** (команда `/newbot`).
   Никогда не публикуется в Git и не передаётся по нешифрованным каналам.
-- Для режима `POST_MODE=TELEGRAM` — `TELEGRAM_TARGET_ID` (например `-1001234567890`).
+- Для публикации в Telegram пользователь указывает канал в диалоге; бот должен иметь право публикации.
   Бот должен быть добавлен в канал с правом публикации сообщений.
 - SSH-доступ к серверу с правами `sudo` (или учётная запись `root`).
 
@@ -161,8 +161,8 @@ BOT_TOKEN=123456789:AA...                # токен от @BotFather
 DATABASE_URL=sqlite+aiosqlite:///data/postmaster.db
 LOG_LEVEL=INFO
 DEFAULT_TIMEZONE=Europe/Moscow
-POST_MODE=REMINDER
-# TELEGRAM_TARGET_ID=-1001234567890      # только если POST_MODE=TELEGRAM
+DEFAULT_POST_MODE=REMINDER
+# TELEGRAM_TARGET_ALLOWLIST=@channel_one,-1001234567890
 HEALTH_FILE=data/health.json
 HEALTH_MAX_AGE_SECONDS=90
 BACKUP_PATH=data/backup.db
@@ -305,7 +305,7 @@ docker inspect --format '{{json .State.Health}}' $(docker compose ps -q postmast
 |-----|----------|
 | 0 | Штатная остановка по `SIGTERM` или healthy health-check |
 | 1 | Токен отклонён, нет сети Telegram, БД недоступна, Scheduler остановлен |
-| 2 | Ошибка конфигурации (`BOT_TOKEN`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `POST_MODE`, `TELEGRAM_TARGET_ID`) |
+| 2 | Ошибка конфигурации (`BOT_TOKEN`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `DEFAULT_POST_MODE`, `TELEGRAM_TARGET_ALLOWLIST`) |
 
 ### 6.3. Системные проверки
 
@@ -432,8 +432,7 @@ sudo -u postmaster /opt/postmaster/.venv/bin/python -m postmaster health --print
 - [ ] `.env` имеет права `600` и не находится в Git.
 - [ ] Настроено расписание резервного копирования.
 - [ ] Настроена ротация логов Docker.
-- [ ] Для `POST_MODE=TELEGRAM` бот добавлен в канал с правом публикации,
-      `TELEGRAM_TARGET_ID` указан в `.env`.
+- [ ] Для публикации в Telegram бот добавлен в выбранный канал с правом публикации.
 
 ---
 
