@@ -12,6 +12,8 @@ class DialogState(StrEnum):
 
     IDLE = "IDLE"
     WAITING_PHOTO = "WAITING_PHOTO"
+    WAITING_PUBLICATION_TYPE = "WAITING_PUBLICATION_TYPE"
+    WAITING_TARGET = "WAITING_TARGET"
     WAITING_DATETIME = "WAITING_DATETIME"
 
 
@@ -20,6 +22,9 @@ class DialogEvent(StrEnum):
 
     START = "/start"
     PHOTO = "PHOTO"
+    REMINDER = "REMINDER"
+    TELEGRAM = "TELEGRAM"
+    VALID_TARGET = "VALID_TARGET"
     VALID_DATETIME = "VALID_DATETIME"
 
 
@@ -32,10 +37,17 @@ TRANSITIONS: dict[tuple[DialogState, DialogEvent], DialogState] = {
     (DialogState.IDLE, DialogEvent.START): DialogState.WAITING_PHOTO,
     (DialogState.WAITING_PHOTO, DialogEvent.START): DialogState.WAITING_PHOTO,
     (DialogState.WAITING_DATETIME, DialogEvent.START): DialogState.WAITING_PHOTO,
+    (DialogState.WAITING_PUBLICATION_TYPE, DialogEvent.START): DialogState.WAITING_PHOTO,
+    (DialogState.WAITING_TARGET, DialogEvent.START): DialogState.WAITING_PHOTO,
+    (DialogState.WAITING_PUBLICATION_TYPE, DialogEvent.REMINDER): DialogState.WAITING_DATETIME,
+    (DialogState.WAITING_PUBLICATION_TYPE, DialogEvent.TELEGRAM): DialogState.WAITING_TARGET,
+    (DialogState.WAITING_TARGET, DialogEvent.VALID_TARGET): DialogState.WAITING_DATETIME,
+    (DialogState.WAITING_PUBLICATION_TYPE, DialogEvent.PHOTO): DialogState.WAITING_PUBLICATION_TYPE,
+    (DialogState.WAITING_TARGET, DialogEvent.PHOTO): DialogState.WAITING_TARGET,
     # SPEC-009 §32: после завершения новая фотография начинает новый сценарий.
-    (DialogState.IDLE, DialogEvent.PHOTO): DialogState.WAITING_DATETIME,
+    (DialogState.IDLE, DialogEvent.PHOTO): DialogState.WAITING_PUBLICATION_TYPE,
     # BR-02: фото принимается на шаге ожидания фотографии.
-    (DialogState.WAITING_PHOTO, DialogEvent.PHOTO): DialogState.WAITING_DATETIME,
+    (DialogState.WAITING_PHOTO, DialogEvent.PHOTO): DialogState.WAITING_PUBLICATION_TYPE,
     # BR-04: новое фото на шаге даты заменяет предыдущее, состояние остаётся прежним.
     (DialogState.WAITING_DATETIME, DialogEvent.PHOTO): DialogState.WAITING_DATETIME,
     # BR-03: корректная дата создаёт пост и возвращает в IDLE.

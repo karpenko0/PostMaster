@@ -9,7 +9,7 @@
 import logging
 
 from telebot.async_telebot import AsyncTeleBot
-from telebot.types import Message
+from telebot.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telebot.util import content_type_media
 
 from postmaster.domain.dialog import DialogState
@@ -17,7 +17,13 @@ from postmaster.domain.photo import PhotoProcessingError
 from postmaster.domain.post import PublicationType
 from postmaster.domain.schedule import DATETIME_EXAMPLE, DateTimeErrorCode
 from postmaster.domain.timezone import convert_utc_to_local
-from postmaster.services.dialog_service import DialogOutcome, DialogOutcomeKind, DialogService
+from postmaster.services.dialog_service import (
+    REMINDER_BUTTON,
+    TELEGRAM_BUTTON,
+    DialogOutcome,
+    DialogOutcomeKind,
+    DialogService,
+)
 from postmaster.services.photo_service import PhotoService
 
 logger = logging.getLogger(__name__)
@@ -51,6 +57,8 @@ PHOTO_REQUEST = "Отправь фотографию, которую нужно 
 HINT_BY_STATE: dict[DialogState, str] = {
     DialogState.IDLE: "Чтобы создать публикацию, отправьте /start.",
     DialogState.WAITING_PHOTO: PHOTO_REQUEST,
+    DialogState.WAITING_PUBLICATION_TYPE: "Как опубликовать этот пост?",
+    DialogState.WAITING_TARGET: "Укажите Telegram-канал для публикации.",
     DialogState.WAITING_DATETIME: f"Сейчас ждём дату публикации. {DATE_PROMPT}",
 }
 
@@ -77,9 +85,17 @@ def reply_text(outcome: DialogOutcome) -> str:
     """Текст ответа для исхода шага. Приветствие /start формирует обработчик команды."""
     match outcome.kind:
         case DialogOutcomeKind.PHOTO_ACCEPTED:
-            return PHOTO_ACCEPTED_TEXT
+            return "Как опубликовать этот пост?"
         case DialogOutcomeKind.PHOTO_REPLACED:
-            return f"Фото заменено. {DATE_PROMPT}"
+            return f"Фото заменено. {HINT_BY_STATE[outcome.state]}"
+        case DialogOutcomeKind.TYPE_SELECTED:
+            return DATE_PROMPT
+        case DialogOutcomeKind.TARGET_REQUESTED:
+            return "Укажите Telegram-канал для публикации."
+        case DialogOutcomeKind.TARGET_INVALID:
+            return "Некорректный идентификатор. Укажите @channel_name или числовой ID канала."
+        case DialogOutcomeKind.TARGET_FORBIDDEN:
+            return "Этот канал не входит в список разрешённых. Укажите другой канал."
         case DialogOutcomeKind.DATETIME_INVALID:
             return (
                 PAST_DATETIME_TEXT
@@ -139,7 +155,12 @@ def register_dialog_handlers(
             await bot.send_message(message.chat.id, PHOTO_REQUEST)
             return
         outcome = await dialog_service.receive_photo(sender.id, message.chat.id, photo)
-        await bot.send_message(message.chat.id, reply_text(outcome))
+        if outcome.state == DialogState.WAITING_PUBLICATION_TYPE:
+            keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            keyboard.add(KeyboardButton(REMINDER_BUTTON), KeyboardButton(TELEGRAM_BUTTON))
+            await bot.send_message(message.chat.id, reply_text(outcome), reply_markup=keyboard)
+        else:
+            await bot.send_message(message.chat.id, reply_text(outcome))
 
     @bot.message_handler(content_types=["text"], chat_types=["private"])
     async def on_text(message: Message) -> None:
@@ -147,7 +168,12 @@ def register_dialog_handlers(
         if sender is None:
             return
         outcome = await dialog_service.receive_text(sender.id, message.chat.id, message.text or "")
-        await bot.send_message(message.chat.id, reply_text(outcome))
+        if outcome.kind in (DialogOutcomeKind.TYPE_SELECTED, DialogOutcomeKind.TARGET_REQUESTED):
+            await bot.send_message(
+                message.chat.id, reply_text(outcome), reply_markup=ReplyKeyboardRemove()
+            )
+        else:
+            await bot.send_message(message.chat.id, reply_text(outcome))
 
     @bot.message_handler(content_types=OTHER_CONTENT_TYPES, chat_types=["private"])
     async def on_other(message: Message) -> None:
