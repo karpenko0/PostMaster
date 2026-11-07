@@ -20,7 +20,6 @@ from telebot.asyncio_helper import ApiTelegramException
 
 from postmaster.bot.dialog_store import TelebotDialogStore
 from postmaster.bot.factory import close_bot_session, create_bot
-from postmaster.bot.sender import BotTelegramReminderSender, BotTelegramSender
 from postmaster.bot.transport import PollingTransport, Transport
 from postmaster.config import ConfigError, Settings, load_settings
 from postmaster.database.backup import BackupError, create_backup
@@ -47,6 +46,7 @@ from postmaster.services.my_posts_service import MyPostsService
 from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
 from postmaster.services.publication_service import PublicationService
+from postmaster.services.recovery_service import RecoveryService
 from postmaster.services.scheduler_service import SchedulerService
 from postmaster.services.user_service import UserService
 from postmaster.utils.health import (
@@ -115,15 +115,16 @@ class Application:
             default_timezone=settings.default_timezone,
         )
         post_repository = PostRepository(session_factory)
-        bot = create_bot(settings.bot_token.get_secret_value())
+        bot = create_bot(settings.bot_token.get_secret_value(), settings.bot_proxy_url)
         telegram_client = BotTelegramClient(bot)
         reminder_publisher = ReminderPublisher(
             telegram_client=telegram_client,
             user_repository=user_repository,
+            secrets=settings.secret_values,
         )
         telegram_publisher = TelegramPublisher(
             telegram_client=telegram_client,
-            secrets=(settings.bot_token.get_secret_value(),),
+            secrets=settings.secret_values,
         )
         publisher_resolver = PublisherResolver(
             reminder_publisher=reminder_publisher,
@@ -157,6 +158,13 @@ class Application:
             my_posts_service=my_posts_service,
             cancel_service=cancel_service,
         )
+
+        class _RecoveryExecutor:
+            async def publish(self, post_id: int) -> bool:
+                return await publication_service.execute(post_id)
+
+        missed_post_handler = MissedPostHandler(post_repository, _RecoveryExecutor())
+        recovery_service = RecoveryService(post_repository, scheduler, missed_post_handler)
         instance = cls(
             bot=bot,
             engine=engine,

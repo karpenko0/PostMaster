@@ -8,6 +8,7 @@
 import re
 from pathlib import Path
 from typing import Literal
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -38,9 +39,15 @@ class ConfigError(RuntimeError):
 class Settings(BaseSettings):
     """Параметры приложения. Имена переменных окружения совпадают с полями без учёта регистра."""
 
-    model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        extra="ignore", case_sensitive=False, hide_input_in_errors=True
+    )
 
     bot_token: SecretStr = Field(description="Токен бота от @BotFather (BOT_TOKEN).")
+    bot_proxy_url: str | None = Field(
+        default=None, repr=False, exclude=True,
+        description="Proxy для Telegram API (BOT_PROXY_URL).",
+    )
     database_url: str = Field(
         default=DEFAULT_DATABASE_URL,
         min_length=1,
@@ -88,6 +95,14 @@ class Settings(BaseSettings):
         # чтобы redaction скрыла и логин, и пароль.
         if _URL_CREDENTIALS_PATTERN.search(self.database_url):
             values.append(self.database_url)
+        if self.bot_proxy_url:
+            parsed = urlsplit(self.bot_proxy_url)
+            if parsed.username is not None:
+                # Исключения могут содержать как URL целиком, так и отдельные
+                # (в том числе декодированные) части данных авторизации.
+                values.extend([self.bot_proxy_url, parsed.username, unquote(parsed.username)])
+                if parsed.password is not None:
+                    values.extend([parsed.password, unquote(parsed.password)])
         # Убираем дубликаты и пустые значения.
         seen: set[str] = set()
         unique: list[str] = []
@@ -110,6 +125,52 @@ class Settings(BaseSettings):
     def _check_token_format(cls, value: SecretStr) -> SecretStr:
         if not _TOKEN_PATTERN.fullmatch(value.get_secret_value()):
             raise ValueError("не задан или имеет неверный формат")
+        return value
+
+    @field_validator("bot_proxy_url", mode="before")
+    @classmethod
+    def _check_proxy_url(cls, value: object) -> str | None:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        error = "ожидается URL http:// или socks5:// с hostname и портом (1–65535)"
+        if not isinstance(value, str):
+            raise ValueError(error)
+        value = value.strip()
+        try:
+            parsed = urlsplit(value)
+            host = parsed.hostname
+            port = parsed.port
+            userinfo = parsed.netloc.rsplit("@", 1)[0] if "@" in parsed.netloc else None
+            if (
+                parsed.scheme not in {"http", "socks5"}
+                or not host or port is None or not 1 <= port <= 65535
+                or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+                or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value)
+                or "\\" in value
+                or re.search(r"%(?![0-9a-fA-F]{2})", value)
+                or (userinfo is not None and (
+                    "@" in userinfo or not parsed.username or not parsed.password
+                    or ":" not in userinfo
+                ))
+                or any(ch in host for ch in "%/#?@")
+            ):
+                raise ValueError
+            # Домен должен содержать только допустимые символы; IPv6 уже
+            # проверен urlsplit при разборе адреса в квадратных скобках.
+            ascii_host = host.encode("idna").decode("ascii")
+            if ":" not in ascii_host and (
+                len(ascii_host) > 253 or not all(
+                    re.fullmatch(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?", label)
+                    for label in ascii_host.rstrip(".").split(".")
+                )
+            ):
+                raise ValueError
+            if parsed.scheme == "socks5" and parsed.username is not None:
+                if any(len(unquote(part).encode("utf-8")) > 255
+                       for part in (parsed.username, parsed.password or "")):
+                    raise ValueError
+        except (ValueError, UnicodeError):
+            raise ValueError(error) from None
         return value
 
     @field_validator("database_url")

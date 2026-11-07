@@ -32,6 +32,7 @@ cp .env.example .env
 
 | Переменная     | Обязательна | По умолчанию                           | Назначение                                              |
 |----------------|-------------|----------------------------------------|---------------------------------------------------------|
+| `BOT_PROXY_URL` | нет | пусто | HTTP или SOCKS5 proxy для Telegram Bot API |
 | `BOT_TOKEN`    | да          | —                                      | Токен бота. В логи и тексты ошибок не попадает          |
 | `DATABASE_URL` | нет         | `sqlite+aiosqlite:///data/postmaster.db` | Строка подключения SQLAlchemy с асинхронным драйвером |
 | `LOG_LEVEL`    | нет         | `INFO`                                 | `DEBUG`, `INFO`, `WARNING`, `ERROR` или `CRITICAL`      |
@@ -43,6 +44,28 @@ cp .env.example .env
 | `BACKUP_PATH` | нет | `data/backup.db` | Путь к файлу резервной копии SQLite (SPEC-030) |
 
 Переменные окружения имеют приоритет над файлом `.env`. Файл `.env` не попадает в Git и в образ Docker.
+
+## Proxy для Telegram Bot API
+
+По умолчанию `BOT_PROXY_URL` пуст: бот подключается напрямую. При необходимости
+задайте в `.env` адрес с обязательным портом:
+
+```dotenv
+BOT_PROXY_URL=socks5://127.0.0.1:1080
+# BOT_PROXY_URL=http://proxy-host:8080
+# BOT_PROXY_URL=socks5://username:password@proxy-host:1080
+# BOT_PROXY_URL=http://username:password@proxy-host:8080
+```
+
+Поддерживаются только `http` и `socks5`; для специальных символов в логине и
+пароле используйте percent-encoding (например, `%40` для `@`). Некорректный URL
+останавливает запуск с ошибкой конфигурации; доступность proxy заранее не проверяется.
+Не публикуйте `.env`: он может содержать секреты. В логах указывается только состояние
+proxy. Все запросы Telegram, включая `getMe`, long polling и загрузку файлов, идут
+через него. В pyTelegramBotAPI сессия общая для процесса, поэтому одновременно
+работающие экземпляры бота должны использовать один proxy. При запуске через Docker
+Compose файл `.env` передаётся в контейнер через `env_file`; `127.0.0.1` внутри
+контейнера обозначает сам контейнер, а не хост — используйте доступный ему адрес proxy.
 
 ## Запуск локально
 
@@ -133,7 +156,7 @@ mkdir -p data && sudo chown -R 1000:1000 data
 |-----|--------------------------------------------------------------------------|
 | 0   | Штатная остановка по `SIGINT` или `SIGTERM`. Для `python -m postmaster health` — отчёт healthy |
 | 1   | Ошибка запуска или работы: токен отклонён, нет связи с Telegram, БД недоступна. Для `python -m postmaster health` — отчёт unhealthy, устарел, повреждён или отсутствует |
-| 2   | Ошибка конфигурации: неверный `BOT_TOKEN`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `POST_MODE` или не заданный для TELEGRAM `TELEGRAM_TARGET_ID` |
+| 2   | Ошибка конфигурации: неверный `BOT_TOKEN`, `BOT_PROXY_URL`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `POST_MODE` или не заданный для TELEGRAM `TELEGRAM_TARGET_ID` |
 
 ## Health check (SPEC-029)
 

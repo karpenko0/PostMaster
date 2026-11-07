@@ -11,6 +11,7 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "pyTelegramBotAPI>=4.37,<5",
+    "aiohttp-socks>=0.10,<1",
     "SQLAlchemy[asyncio]>=2.0,<3",
     "aiosqlite>=0.20,<1",
     "APScheduler>=3.11,<4",
