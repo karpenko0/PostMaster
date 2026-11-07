@@ -11,8 +11,10 @@ from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
-from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from postmaster.domain.telegram_target import parse_allowlist
 
 DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///data/postmaster.db"
 DEFAULT_ENV_FILE = ".env"
@@ -51,10 +53,12 @@ class Settings(BaseSettings):
         default=DEFAULT_TIMEZONE,
         description="Часовой пояс по умолчанию, IANA, например Europe/Moscow (DEFAULT_TIMEZONE).",
     )
-    post_mode: Literal["REMINDER", "TELEGRAM"] = Field(
+    default_post_mode: Literal["REMINDER", "TELEGRAM"] = Field(
         default="REMINDER",
-        description="Тип новых публикаций для текущего диалога (POST_MODE).",
+        validation_alias=AliasChoices("DEFAULT_POST_MODE", "POST_MODE"),
+        description="Режим по умолчанию для совместимости с POST_MODE.",
     )
+    telegram_target_allowlist: str = ""
     telegram_target_id: str | None = Field(
         default=None,
         description="Канал для режима TELEGRAM (TELEGRAM_TARGET_ID).",
@@ -97,13 +101,14 @@ class Settings(BaseSettings):
                 unique.append(value)
         return tuple(unique)
 
-    @model_validator(mode="after")
-    def _check_post_mode(self) -> "Settings":
-        if self.post_mode == "TELEGRAM" and (
-            not self.telegram_target_id or not self.telegram_target_id.strip()
-        ):
-            raise ValueError("TELEGRAM_TARGET_ID обязателен для POST_MODE=TELEGRAM")
-        return self
+    @field_validator("telegram_target_allowlist")
+    @classmethod
+    def _check_allowlist(cls, value: str) -> str:
+        try:
+            parse_allowlist(value)
+        except ValueError:
+            raise ValueError("некорректный идентификатор канала") from None
+        return value
 
     @field_validator("bot_token")
     @classmethod
