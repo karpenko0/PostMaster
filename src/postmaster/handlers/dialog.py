@@ -127,6 +127,24 @@ def reply_text(outcome: DialogOutcome) -> str:
             return "⚠️ Не удалось сохранить публикацию. Повтори дату позже; фото сохранено."
         case DialogOutcomeKind.INVALID_MESSAGE:
             return HINT_BY_STATE[outcome.state]
+        case DialogOutcomeKind.RESCHEDULE_PROMPT:
+            return DATE_PROMPT
+        case DialogOutcomeKind.RESCHEDULE_DATETIME_INVALID:
+            return (
+                PAST_DATETIME_TEXT
+                if outcome.error_code == DateTimeErrorCode.PAST_DATETIME
+                else INVALID_FORMAT_TEXT
+            )
+        case DialogOutcomeKind.RESCHEDULE_OK:
+            if outcome.scheduled_at is None:
+                raise ValueError("подтверждение переноса без нового времени")
+            local = outcome.scheduled_at
+            date = f"{local.day:02d}.{local.month:02d}.{local.year:04d}"
+            clock = f"{local.hour:02d}:{local.minute:02d}"
+            post_id = outcome.post.id if outcome.post else 0
+            return f"Публикация #{post_id} перенесена на {date} в {clock}."
+        case DialogOutcomeKind.RESCHEDULE_REJECTED:
+            return "Не удалось перенести публикацию. Она больше недоступна."
         case _:
             raise ValueError(f"для исхода {outcome.kind} нет текста в обработчиках шагов")
 

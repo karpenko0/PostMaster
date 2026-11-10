@@ -46,6 +46,7 @@ from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
 from postmaster.services.publication_service import PublicationService
 from postmaster.services.recovery_service import RecoveryService
+from postmaster.services.reschedule_service import RescheduleService
 from postmaster.services.scheduler_service import SchedulerService
 from postmaster.services.user_service import UserService
 from postmaster.utils.health import (
@@ -142,6 +143,10 @@ class Application:
 
         missed_post_handler = MissedPostHandler(post_repository, _MissedExecutor())
         recovery_service = RecoveryService(post_repository, scheduler, missed_post_handler)
+        reschedule_service = RescheduleService(
+            post_repository=post_repository,
+            scheduler=scheduler,
+        )
         dialog_service = DialogService(
             TelebotDialogStore(bot),
             user_service=user_service,
@@ -150,7 +155,7 @@ class Application:
                 scheduler,
                 telegram_target_allowlist=settings.telegram_target_allowlist,
             ),
-            telegram_target_allowlist=settings.telegram_target_allowlist,
+            reschedule_service=reschedule_service,
         )
         my_posts_service = MyPostsService(
             post_repository=post_repository,

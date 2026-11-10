@@ -45,6 +45,7 @@ EVENT_CLAIM_SKIPPED = "claim_skipped"
 EVENT_PUBLISH_OK = "publish_ok"
 EVENT_POST_FAILED = "post_failed"
 EVENT_POST_CANCELLED = "post_cancelled"
+EVENT_POST_RESCHEDULED = "post_rescheduled"
 EVENT_STATUS_CHANGED = "status_changed"
 
 EVENT_SCHEDULER_START = "scheduler_start"
@@ -71,6 +72,10 @@ EVENT_COMMAND_CANCEL = "command_cancel"
 EVENT_COMMAND_MY_POSTS = "command_my_posts"
 EVENT_COMMAND_HELP = "command_help"
 EVENT_COMMAND_FAILED = "command_failed"
+
+EVENT_POST_CANCEL_BUTTON = "post_cancel_button"
+EVENT_POST_RESCHEDULE_BUTTON = "post_reschedule_button"
+EVENT_POST_RESCHEDULED_OK = "post_rescheduled_ok"
 
 EVENT_MISSED = "missed"
 EVENT_ERROR = "error"

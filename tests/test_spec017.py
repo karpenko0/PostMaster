@@ -467,10 +467,13 @@ async def test_my_posts_e2e_via_fake_telegram(running_app, fake_telegram, tmp_pa
 
     # Отправляем /my_posts
     fake_telegram.add_text_message("/my_posts", chat_id=200, user_id=200)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
+    # PM-04: /my_posts отправляет заголовок + по одному сообщению на пост.
+    await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
 
-    # Проверяем сообщение с /my_posts
+    # Проверяем сообщения с /my_posts (заголовок + блок поста).
     my_posts_message = fake_telegram.sent_messages[-1]
     assert my_posts_message["chat_id"] == "200"
-    assert "ID 1" in my_posts_message["text"]
-    assert "напоминание" in my_posts_message["text"]
+    texts = [m["text"] for m in fake_telegram.sent_messages[-2:]]
+    combined = "\n".join(texts)
+    assert "ID 1" in combined
+    assert "Напоминание" in combined

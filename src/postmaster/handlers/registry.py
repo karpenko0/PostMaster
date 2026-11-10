@@ -11,6 +11,7 @@ from postmaster.handlers.cancel import register_cancel_handler
 from postmaster.handlers.dialog import register_dialog_handlers
 from postmaster.handlers.help import register_help_handler
 from postmaster.handlers.my_posts import register_my_posts_handler
+from postmaster.handlers.post_actions import register_post_actions_callbacks
 from postmaster.handlers.start import register_start_handler
 from postmaster.services.cancel_service import CancelService
 from postmaster.services.dialog_service import DialogService
@@ -37,4 +38,10 @@ def register_handlers(
     register_start_handler(bot, user_service, dialog_service)
     register_my_posts_handler(bot, my_posts_service)
     register_cancel_handler(bot, user_service, cancel_service)
+    register_post_actions_callbacks(
+        bot,
+        user_service=user_service,
+        cancel_service=cancel_service,
+        dialog_service=dialog_service,
+    )
     register_dialog_handlers(bot, dialog_service, photo_service)

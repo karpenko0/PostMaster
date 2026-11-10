@@ -29,6 +29,7 @@ from postmaster.utils.logging_config import (
     EVENT_POST_CANCELLED,
     EVENT_POST_CREATED,
     EVENT_POST_FAILED,
+    EVENT_POST_RESCHEDULED,
     EVENT_PUBLISH_OK,
     EVENT_STATUS_CHANGED,
     log_event,
@@ -410,3 +411,43 @@ class PostRepository:
             )
             return True
         return False
+    async def reschedule_post(
+        self,
+        post_id: int,
+        user_id: int,
+        scheduled_at_utc: datetime,
+        *,
+        now: datetime | None = None,
+    ) -> Post | None:
+        """Атомарно меняет scheduled_at_utc только для собственного PENDING поста (PM-04).
+
+        Условие UPDATE совпадает с cancel_post: id+user_id+status=PENDING. Это даёт
+        взаимную исключительность с claim (PENDING→PROCESSING) и с cancel (PENDING→CANCELLED).
+        При rowcount=1 возвращается актуальный Post; иначе — None.
+        """
+        when = _to_storage(scheduled_at_utc, "scheduled_at_utc")
+        stamp = _to_storage(now if now is not None else utc_now(), "now")
+        async with self._session_factory() as session, session.begin():
+            result = await session.execute(
+                update(PostModel)
+                .where(
+                    PostModel.id == post_id,
+                    PostModel.user_id == user_id,
+                    PostModel.status == PostStatus.PENDING.value,
+                )
+                .values(scheduled_at_utc=when, updated_at=stamp)
+            )
+            if result.rowcount != 1:
+                return None
+            model = await session.get(PostModel, post_id)
+            if model is None:
+                return None
+            post = _to_domain(model)
+        log_event(
+            logger,
+            EVENT_POST_RESCHEDULED,
+            post_id=post_id,
+            user_id=user_id,
+            scheduled_at_utc=when.isoformat(),
+        )
+        return post

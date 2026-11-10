@@ -6,6 +6,7 @@
 
 import asyncio
 import itertools
+import json
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qsl
@@ -53,6 +54,10 @@ class FakeTelegram:
     sent_messages: list[dict[str, str]] = field(default_factory=list)
     # Фотографии, которые бот отправил через sendPhoto: chat_id, photo (file_id) и caption.
     sent_photos: list[dict[str, str | None]] = field(default_factory=list)
+    # Ответы на answerCallbackQuery (PM-04).
+    answered_callbacks: list[dict[str, Any]] = field(default_factory=list)
+    # Inline-сообщения с reply_markup (PM-04).
+    sent_inline_markups: list[dict[str, Any]] = field(default_factory=list)
     # Хронологический порядок всех исходящих событий (sendMessage и sendPhoto).
     outbound_events: list[dict[str, Any]] = field(default_factory=list)
     fail_send_message: tuple[int, str] | None = None
@@ -185,6 +190,39 @@ class FakeTelegram:
         }
         self._pending.append({"update_id": update_id, "message": message})
 
+    def add_callback_query(
+        self,
+        callback_data: str,
+        *,
+        chat_id: int = 42,
+        user_id: int | None = None,
+        message_id: int = 1,
+    ) -> None:
+        """Ставит в очередь callback_query (нажатие inline-кнопки, PM-04)."""
+        update_id = next(self._update_ids)
+        sender: dict[str, Any] = {
+            "id": chat_id if user_id is None else user_id,
+            "is_bot": False,
+            "first_name": "Tester",
+        }
+        update: dict[str, Any] = {
+            "update_id": update_id,
+            "callback_query": {
+                "id": str(update_id),
+                "from": sender,
+                "chat_instance": "test",
+                "data": callback_data,
+                "message": {
+                    "message_id": message_id,
+                    "date": 1_700_000_000,
+                    "chat": {"id": chat_id, "type": "private"},
+                    "from": {"id": 1, "is_bot": True, "first_name": "PostMaster"},
+                    "text": "(callback source)",
+                },
+            },
+        }
+        self._pending.append(update)
+
     async def start(self) -> None:
         app = web.Application()
         app.router.add_route("*", "/bot{token}/{method}", self._handle)
@@ -219,6 +257,8 @@ class FakeTelegram:
             return await self._send_message(request)
         if method == "sendPhoto":
             return await self._send_photo(request)
+        if method == "answerCallbackQuery":
+            return await self._answer_callback(request)
         return _ok(True)
 
     async def _send_message(self, request: web.Request) -> web.Response:
@@ -230,8 +270,16 @@ class FakeTelegram:
         params = await _request_params(request)
         chat_id = params.get("chat_id", "")
         text = params.get("text", "")
+        reply_markup_raw = params.get("reply_markup")
         self.sent_messages.append({"chat_id": chat_id, "text": text})
         self.outbound_events.append({"method": "sendMessage", "chat_id": chat_id, "text": text})
+        if reply_markup_raw:
+            try:
+                self.sent_inline_markups.append(
+                    {"chat_id": chat_id, "text": text, "reply_markup": json.loads(reply_markup_raw)}
+                )
+            except (ValueError, TypeError):
+                pass
         # Telegram возвращает отправленное сообщение. pyTelegramBotAPI разбирает его как Message.
         return _ok(
             {
@@ -241,6 +289,16 @@ class FakeTelegram:
                 "text": text,
             }
         )
+
+    async def _answer_callback(self, request: web.Request) -> web.Response:
+        params = await _request_params(request)
+        self.answered_callbacks.append(
+            {
+                "callback_query_id": params.get("callback_query_id", ""),
+                "text": params.get("text", ""),
+            }
+        )
+        return _ok(True)
 
     async def _send_photo(self, request: web.Request) -> web.Response:
         if self.fail_send_photo is not None:

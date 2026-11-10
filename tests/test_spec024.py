@@ -148,7 +148,8 @@ async def test_my_posts_service_empty_for_unknown_telegram_id(post_repo) -> None
 
     text = await service.render_list(telegram_user_id=999_999)
 
-    assert text == "У вас нет запланированных публикаций."
+    # PM-04: точный текст сообщения об отсутствии публикаций.
+    assert text == "У тебя пока нет запланированных публикаций."
 
 
 # === cancel isolation ======================================================

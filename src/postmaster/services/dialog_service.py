@@ -34,6 +34,10 @@ from postmaster.services.post_service import (
     PostService,
     SchedulerRegistrationError,
 )
+from postmaster.services.reschedule_service import (
+    PostNotPendingError,
+    RescheduleService,
+)
 from postmaster.services.user_service import UserService
 from postmaster.utils.clock import utc_now
 
@@ -49,6 +53,10 @@ PHOTO_HEIGHT_KEY = "height"
 CAPTION_KEY = "caption"
 PUBLICATION_TYPE_KEY = "publication_type"
 TARGET_ID_KEY = "target_id"
+# ID поста, для которого запрошен перенос времени.
+RESCHEDULE_POST_ID_KEY = "reschedule_post_id"
+# ID поста, для которого запрошен перенос времени.
+RESCHEDULE_POST_ID_KEY = "reschedule_post_id"
 REMINDER_BUTTON = "🔔 Напомнить мне"
 TELEGRAM_BUTTON = "📢 Опубликовать в Telegram"
 
@@ -99,6 +107,12 @@ class DialogOutcomeKind(StrEnum):
     POST_SAVED_UNSCHEDULED = "post_saved_unscheduled"
     POST_FAILED = "post_failed"
     INVALID_MESSAGE = "invalid_message"
+    # PM-04: перенос публикации.
+    RESCHEDULE_PROMPT = "reschedule_prompt"
+    RESCHEDULE_DATETIME_INVALID = "reschedule_datetime_invalid"
+    RESCHEDULE_OK = "reschedule_ok"
+    RESCHEDULE_REJECTED = "reschedule_rejected"
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,12 +144,15 @@ class DialogService:
         publication_type: PublicationType = PublicationType.REMINDER,
         target_id: str | None = None,
         telegram_target_allowlist: str = "",
+        reschedule_service: RescheduleService | None = None,
     ) -> None:
         self._store = store
         self._users = user_service
         self._posts = post_service
         # Legacy defaults are intentionally not substituted for an explicit choice.
         self._allowlist = parse_allowlist(telegram_target_allowlist)
+        # PM-04: сервис переноса публикаций.
+        self._reschedule = reschedule_service
         # Сообщения одного пользователя в одном чате обрабатываются по очереди (решение D11).
         self._locks: defaultdict[tuple[int, int], asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -227,6 +244,9 @@ class DialogService:
                 await self._store.set_draft(user_id, chat_id, draft)
                 await self._store.set_state(user_id, chat_id, target)
                 return DialogOutcome(DialogOutcomeKind.TYPE_SELECTED, target)
+            if current == DialogState.WAITING_RESCHEDULE_DATETIME:
+                # PM-04: перенос публикации на новое время.
+                return await self._handle_reschedule_datetime_input(user_id, chat_id, text)
             target = next_state(current, DialogEvent.VALID_DATETIME)
             if target is None:
                 return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
@@ -291,3 +311,109 @@ class DialogService:
     async def _current_state(self, user_id: int, chat_id: int) -> DialogState:
         raw = await self._store.get_state(user_id, chat_id)
         return DialogState.IDLE if raw is None else DialogState(raw)
+
+    # === PM-04: перенос публикации =========================================
+
+    async def start_reschedule(
+        self, user_id: int, chat_id: int, post_id: int
+    ) -> DialogOutcome:
+        """PM-04: переключает FSM в режим ожидания новой даты/времени для поста.
+
+        ID поста сохраняется в черновике (RESCHEDULE_POST_ID_KEY). Сервис НЕ проверяет
+        здесь владельца и статус: финальная проверка выполняется внутри
+        RescheduleService при вводе даты (защита от подмены callback data, §7).
+        """
+        async with self._locks[user_id, chat_id]:
+            await self._store.set_state(
+                user_id, chat_id, DialogState.WAITING_RESCHEDULE_DATETIME
+            )
+            await self._store.set_draft(
+                user_id,
+                chat_id,
+                {RESCHEDULE_POST_ID_KEY: str(int(post_id))},
+            )
+        return DialogOutcome(
+            DialogOutcomeKind.RESCHEDULE_PROMPT,
+            DialogState.WAITING_RESCHEDULE_DATETIME,
+        )
+
+    async def _handle_reschedule_datetime_input(
+        self, user_id: int, chat_id: int, text: str
+    ) -> DialogOutcome:
+        """PM-04: валидирует дату и применяет перенос через RescheduleService.
+
+        Вызывается из receive_text под уже удерживаемой блокировкой (asyncio.Lock
+        не реентрантный).
+        """
+        draft = await self._store.get_draft(user_id, chat_id)
+        raw_post_id = draft.get(RESCHEDULE_POST_ID_KEY)
+        if not raw_post_id or not raw_post_id.isdigit():
+            logger.warning(
+                "Reschedule datetime input without post_id user_id=%s draft=%s",
+                user_id,
+                draft,
+            )
+            await self._store.set_state(user_id, chat_id, DialogState.IDLE)
+            await self._store.set_draft(user_id, chat_id, {})
+            return DialogOutcome(
+                DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE
+            )
+        post_id = int(raw_post_id)
+        zone_name = await self._users.timezone_of(user_id)
+        try:
+            parsed = parse_publication_datetime(text, zone_name, utc_now())
+        except DateTimeValidationError as exc:
+            logger.info(
+                "Reschedule datetime rejected user_id=%s post_id=%s code=%s",
+                user_id,
+                post_id,
+                exc.code.value,
+            )
+            return DialogOutcome(
+                DialogOutcomeKind.RESCHEDULE_DATETIME_INVALID,
+                DialogState.WAITING_RESCHEDULE_DATETIME,
+                error_code=exc.code,
+            )
+
+        user = await self._users.get_by_telegram_id(user_id)
+        if user is None or self._reschedule is None:
+            await self._store.set_state(user_id, chat_id, DialogState.IDLE)
+            await self._store.set_draft(user_id, chat_id, {})
+            return DialogOutcome(
+                DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE
+            )
+        try:
+            post = await self._reschedule.reschedule(
+                post_id=post_id,
+                user_id=user.id,
+                scheduled_at_utc=parsed.utc_datetime,
+            )
+        except PostNotPendingError:
+            logger.info(
+                "Reschedule rejected by service user_id=%s post_id=%s",
+                user_id,
+                post_id,
+            )
+            await self._store.set_state(user_id, chat_id, DialogState.IDLE)
+            await self._store.set_draft(user_id, chat_id, {})
+            return DialogOutcome(
+                DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE
+            )
+
+        target = DialogState.IDLE
+        await self._store.set_state(user_id, chat_id, target)
+        await self._store.set_draft(user_id, chat_id, {})
+        logger.info(
+            "Reschedule applied user_id=%s post_id=%s scheduled_at_utc=%s",
+            user_id,
+            post.id,
+            post.scheduled_at_utc,
+        )
+        return DialogOutcome(
+            DialogOutcomeKind.RESCHEDULE_OK,
+            target,
+            post=post,
+            parsed_datetime=parsed,
+            scheduled_at=parsed.local_datetime,
+            zone_name=parsed.timezone,
+        )

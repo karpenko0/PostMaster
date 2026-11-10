@@ -15,6 +15,8 @@ class DialogState(StrEnum):
     WAITING_PUBLICATION_TYPE = "WAITING_PUBLICATION_TYPE"
     WAITING_TARGET = "WAITING_TARGET"
     WAITING_DATETIME = "WAITING_DATETIME"
+    # PM-04: перенос публикации на новое время через inline-кнопку.
+    WAITING_RESCHEDULE_DATETIME = "WAITING_RESCHEDULE_DATETIME"
 
 
 class DialogEvent(StrEnum):
@@ -26,6 +28,8 @@ class DialogEvent(StrEnum):
     TELEGRAM = "TELEGRAM"
     VALID_TARGET = "VALID_TARGET"
     VALID_DATETIME = "VALID_DATETIME"
+    # PM-04: перенос публикации на новое время.
+    RESCHEDULE_VALID = "RESCHEDULE_VALID"
 
 
 class InvalidTransitionError(RuntimeError):
@@ -52,6 +56,10 @@ TRANSITIONS: dict[tuple[DialogState, DialogEvent], DialogState] = {
     (DialogState.WAITING_DATETIME, DialogEvent.PHOTO): DialogState.WAITING_DATETIME,
     # BR-03: корректная дата создаёт пост и возвращает в IDLE.
     (DialogState.WAITING_DATETIME, DialogEvent.VALID_DATETIME): DialogState.IDLE,
+    # PM-04: корректная новая дата применяется и возвращает в IDLE.
+    (DialogState.WAITING_RESCHEDULE_DATETIME, DialogEvent.RESCHEDULE_VALID): DialogState.IDLE,
+    # PM-04: /start из шага переноса начинает новый сценарий.
+    (DialogState.WAITING_RESCHEDULE_DATETIME, DialogEvent.START): DialogState.WAITING_PHOTO,
 }
 
 
