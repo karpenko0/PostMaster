@@ -7,6 +7,7 @@
 
 import asyncio
 import logging
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -55,8 +56,14 @@ PUBLICATION_TYPE_KEY = "publication_type"
 TARGET_ID_KEY = "target_id"
 # ID поста, для которого запрошен перенос времени.
 RESCHEDULE_POST_ID_KEY = "reschedule_post_id"
-# ID поста, для которого запрошен перенос времени.
-RESCHEDULE_POST_ID_KEY = "reschedule_post_id"
+# PM-05: сохранённое распарсенное время публикации в черновике (iso-строки).
+PARSED_UTC_KEY = "parsed_utc"
+PARSED_LOCAL_KEY = "parsed_local"
+PARSED_TZ_KEY = "parsed_tz"
+# PM-05: уникальный идентификатор черновика — защита от двойного подтверждения.
+DRAFT_ID_KEY = "draft_id"
+# PM-05: ID созданного поста в черновике — защита от повторного создания.
+CONFIRMED_POST_ID_KEY = "confirmed_post_id"
 REMINDER_BUTTON = "🔔 Напомнить мне"
 TELEGRAM_BUTTON = "📢 Опубликовать в Telegram"
 
@@ -103,6 +110,8 @@ class DialogOutcomeKind(StrEnum):
     TARGET_INVALID = "target_invalid"
     TARGET_FORBIDDEN = "target_forbidden"
     DATETIME_INVALID = "datetime_invalid"
+    # PM-05: предварительный просмотр публикации.
+    PREVIEW_SHOWN = "preview_shown"
     POST_CREATED = "post_created"
     POST_SAVED_UNSCHEDULED = "post_saved_unscheduled"
     POST_FAILED = "post_failed"
@@ -112,7 +121,8 @@ class DialogOutcomeKind(StrEnum):
     RESCHEDULE_DATETIME_INVALID = "reschedule_datetime_invalid"
     RESCHEDULE_OK = "reschedule_ok"
     RESCHEDULE_REJECTED = "reschedule_rejected"
-
+    # PM-05: отмена на этапе подтверждения.
+    CONFIRMATION_CANCELLED = "confirmation_cancelled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,60 +257,41 @@ class DialogService:
             if current == DialogState.WAITING_RESCHEDULE_DATETIME:
                 # PM-04: перенос публикации на новое время.
                 return await self._handle_reschedule_datetime_input(user_id, chat_id, text)
-            target = next_state(current, DialogEvent.VALID_DATETIME)
-            if target is None:
-                return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
-            zone_name = await self._users.timezone_of(user_id)
-            try:
-                parsed = parse_publication_datetime(text, zone_name, utc_now())
-            except DateTimeValidationError as exc:
-                if exc.code == DateTimeErrorCode.PAST_DATETIME:
-                    logger.info("Past publication datetime rejected user_id=%s", user_id)
-                else:
-                    logger.info("Invalid publication datetime format user_id=%s", user_id)
+            if current == DialogState.WAITING_DATETIME:
+                # PM-05: валидная дата → предварительный просмотр, Post ещё не создаётся.
+                target = next_state(current, DialogEvent.VALID_DATETIME)
+                if target is None:
+                    return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
+                zone_name = await self._users.timezone_of(user_id)
+                try:
+                    parsed = parse_publication_datetime(text, zone_name, utc_now())
+                except DateTimeValidationError as exc:
+                    if exc.code == DateTimeErrorCode.PAST_DATETIME:
+                        logger.info("Past publication datetime rejected user_id=%s", user_id)
+                    else:
+                        logger.info("Invalid publication datetime format user_id=%s", user_id)
+                    return DialogOutcome(
+                        DialogOutcomeKind.DATETIME_INVALID, current, error_code=exc.code
+                    )
+                logger.info("Publication datetime accepted user_id=%s", user_id)
+                draft = await self._store.get_draft(user_id, chat_id)
+                # Параметры сохраняются в черновике — в таблицу posts они попадут
+                # только после явного подтверждения (PM05-BR-02).
+                draft[PARSED_UTC_KEY] = parsed.utc_datetime.isoformat()
+                draft[PARSED_LOCAL_KEY] = parsed.local_datetime.isoformat()
+                draft[PARSED_TZ_KEY] = parsed.timezone
+                # Уникальный идентификатор черновика: защита от двойного подтверждения.
+                draft[DRAFT_ID_KEY] = str(uuid.uuid4())
+                await self._store.set_draft(user_id, chat_id, draft)
+                await self._store.set_state(user_id, chat_id, target)
                 return DialogOutcome(
-                    DialogOutcomeKind.DATETIME_INVALID, current, error_code=exc.code
+                    DialogOutcomeKind.PREVIEW_SHOWN,
+                    target,
+                    parsed_datetime=parsed,
+                    scheduled_at=parsed.local_datetime,
+                    zone_name=parsed.timezone,
                 )
-            logger.info("Publication datetime accepted user_id=%s", user_id)
-            draft = await self._store.get_draft(user_id, chat_id)
-            try:
-                user = await self._users.get_by_telegram_id(user_id)
-                post = await self._posts.create_scheduled_post(
-                    user_id=None if user is None else user.id,
-                    telegram_file_id=draft.get(PHOTO_FILE_ID_KEY),
-                    telegram_file_unique_id=draft.get(PHOTO_UNIQUE_ID_KEY),
-                    scheduled_at_utc=parsed.utc_datetime,
-                    timezone=parsed.timezone,
-                    publication_type=draft.get(PUBLICATION_TYPE_KEY, ""),
-                    target_id=draft.get(TARGET_ID_KEY),
-                    caption=draft.get(CAPTION_KEY),
-                )
-            except PostCreationError as exc:
-                # Нет записи: оставляем дату и черновик для повторной попытки.
-                return DialogOutcome(DialogOutcomeKind.POST_FAILED, current, error_code=exc.code)
-            except SchedulerRegistrationError as exc:
-                # Запись уже есть: НЕ повторяем создание, иначе пользователь создаст дубликат.
-                post = exc.post
-                kind = DialogOutcomeKind.POST_SAVED_UNSCHEDULED
-            except Exception:
-                logger.error("Post creation failed user_id=%s", user_id)
-                return DialogOutcome(
-                    DialogOutcomeKind.POST_FAILED,
-                    current,
-                    error_code=PostCreationErrorCode.POST_CREATE_FAILED,
-                )
-            else:
-                kind = DialogOutcomeKind.POST_CREATED
-            await self._store.set_state(user_id, chat_id, target)
-            await self._store.set_draft(user_id, chat_id, {})
-        return DialogOutcome(
-            kind,
-            target,
-            post=post,
-            parsed_datetime=parsed,
-            scheduled_at=parsed.local_datetime,
-            zone_name=parsed.timezone,
-        )
+            return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
 
     async def receive_other(self, user_id: int, chat_id: int) -> DialogOutcome:
         """Сообщение без текста и фото (стикер, документ и т. п.) недопустимо во всех состояниях."""
@@ -312,11 +303,162 @@ class DialogService:
         raw = await self._store.get_state(user_id, chat_id)
         return DialogState.IDLE if raw is None else DialogState(raw)
 
+    async def confirm_post(self, user_id: int, chat_id: int) -> DialogOutcome:
+        """Обрабатывает подтверждение публикации (PM-05 §5).
+
+        Защита от двойного подтверждения: используется блокировка ``_locks`` и
+        флаг ``CONFIRMED_POST_ID_KEY`` в черновике. Первый callback создаёт Post;
+        повторные возвращают исход ``POST_CREATED`` для уже созданного поста без
+        новой записи. Повторная защита работает даже после перехода FSM в IDLE,
+        потому что флаг хранится в draft, а не в state.
+        """
+        async with self._locks[user_id, chat_id]:
+            current = await self._current_state(user_id, chat_id)
+            draft = await self._store.get_draft(user_id, chat_id)
+
+            # Дубликат защиты работает даже если state уже не WAITING_CONFIRMATION:
+            # если в draft уже стоит CONFIRMED_POST_ID_KEY, пост создан, второй раз
+            # не создаём.
+            existing_post_id = draft.get(CONFIRMED_POST_ID_KEY)
+            if existing_post_id is not None:
+                logger.info(
+                    "Duplicate confirm ignored user_id=%s post_id=%s",
+                    user_id,
+                    existing_post_id,
+                )
+                # Восстанавливаем время для ответа.
+                local_raw = draft.get(PARSED_LOCAL_KEY)
+                tz = draft.get(PARSED_TZ_KEY)
+                local = datetime.fromisoformat(local_raw) if local_raw else None
+                return DialogOutcome(
+                    DialogOutcomeKind.POST_CREATED,
+                    DialogState.IDLE,
+                    scheduled_at=local,
+                    zone_name=tz,
+                )
+
+            # Подтверждение разрешено только из WAITING_CONFIRMATION.
+            if current != DialogState.WAITING_CONFIRMATION:
+                logger.warning(
+                    "Confirm without WAITING_CONFIRMATION user_id=%s state=%s",
+                    user_id,
+                    current,
+                )
+                return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
+
+            if DRAFT_ID_KEY not in draft:
+                logger.warning("Confirm without draft_id user_id=%s", user_id)
+                return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
+
+            parsed_utc_raw = draft.get(PARSED_UTC_KEY)
+            parsed_local_raw = draft.get(PARSED_LOCAL_KEY)
+            parsed_tz = draft.get(PARSED_TZ_KEY)
+            telegram_file_id = draft.get(PHOTO_FILE_ID_KEY)
+            telegram_file_unique_id = draft.get(PHOTO_UNIQUE_ID_KEY)
+            if not all(
+                [
+                    parsed_utc_raw,
+                    parsed_local_raw,
+                    parsed_tz,
+                    telegram_file_id,
+                    telegram_file_unique_id,
+                ]
+            ):
+                logger.warning("Confirm with incomplete draft user_id=%s", user_id)
+                return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
+
+            # Восстанавливаем datetime из iso-строки черновика.
+            parsed_utc = datetime.fromisoformat(parsed_utc_raw)
+            parsed_local = datetime.fromisoformat(parsed_local_raw)
+            user = await self._users.get_by_telegram_id(user_id)
+            if user is None:
+                logger.error("Confirm rejected: user not found user_id=%s", user_id)
+                return DialogOutcome(
+                    DialogOutcomeKind.POST_FAILED,
+                    current,
+                    error_code=PostCreationErrorCode.USER_NOT_FOUND,
+                )
+
+            publication_type = draft.get(PUBLICATION_TYPE_KEY, PublicationType.REMINDER.value)
+            target_id = draft.get(TARGET_ID_KEY) or None
+            caption = draft.get(CAPTION_KEY) or None
+
+            try:
+                post = await self._posts.create_scheduled_post(
+                    user_id=user.id,
+                    telegram_file_id=telegram_file_id,
+                    telegram_file_unique_id=telegram_file_unique_id,
+                    scheduled_at_utc=parsed_utc,
+                    timezone=parsed_tz,
+                    publication_type=publication_type,
+                    target_id=target_id,
+                    caption=caption,
+                )
+            except PostCreationError as exc:
+                logger.error(
+                    "Post creation failed on confirm user_id=%s code=%s", user_id, exc.code.value
+                )
+                return DialogOutcome(DialogOutcomeKind.POST_FAILED, current, error_code=exc.code)
+            except SchedulerRegistrationError as exc:
+                # Запись сохранена, Scheduler не зарегистрировал задачу — Recovery восстановит.
+                post = exc.post
+                draft[CONFIRMED_POST_ID_KEY] = str(post.id)
+                await self._store.set_draft(user_id, chat_id, draft)
+                await self._store.set_state(user_id, chat_id, DialogState.IDLE)
+                logger.warning(
+                    "Post saved but Scheduler failed on confirm post_id=%s",
+                    post.id,
+                )
+                return DialogOutcome(
+                    DialogOutcomeKind.POST_SAVED_UNSCHEDULED,
+                    DialogState.IDLE,
+                    post=post,
+                    scheduled_at=parsed_local,
+                    zone_name=parsed_tz,
+                )
+            except Exception:
+                logger.exception("Unexpected error on confirm user_id=%s", user_id)
+                return DialogOutcome(
+                    DialogOutcomeKind.POST_FAILED,
+                    current,
+                    error_code=PostCreationErrorCode.POST_CREATE_FAILED,
+                )
+
+            # Запись создана, Scheduler зарегистрировал — фиксируем флаг,
+            # чтобы повторный callback не создавал дубликат.
+            draft[CONFIRMED_POST_ID_KEY] = str(post.id)
+            await self._store.set_draft(user_id, chat_id, draft)
+            await self._store.set_state(user_id, chat_id, DialogState.IDLE)
+            logger.info("Post confirmed post_id=%s user_id=%s", post.id, user_id)
+            return DialogOutcome(
+                DialogOutcomeKind.POST_CREATED,
+                DialogState.IDLE,
+                post=post,
+                scheduled_at=parsed_local,
+                zone_name=parsed_tz,
+            )
+
+    async def cancel_creation(self, user_id: int, chat_id: int) -> DialogOutcome:
+        """Обрабатывает отмену создания публикации (PM-05 §6).
+
+        Полностью завершает сценарий: очищает черновик, переводит FSM в IDLE,
+        не создаёт Post и не регистрирует задачу Scheduler.
+        """
+        async with self._locks[user_id, chat_id]:
+            current = await self._current_state(user_id, chat_id)
+            if current != DialogState.WAITING_CONFIRMATION:
+                return DialogOutcome(DialogOutcomeKind.INVALID_MESSAGE, current)
+            await self._store.set_draft(user_id, chat_id, {})
+            await self._store.set_state(user_id, chat_id, DialogState.IDLE)
+        logger.info("Post creation cancelled by user user_id=%s", user_id)
+        return DialogOutcome(
+            DialogOutcomeKind.CONFIRMATION_CANCELLED,
+            DialogState.IDLE,
+        )
+
     # === PM-04: перенос публикации =========================================
 
-    async def start_reschedule(
-        self, user_id: int, chat_id: int, post_id: int
-    ) -> DialogOutcome:
+    async def start_reschedule(self, user_id: int, chat_id: int, post_id: int) -> DialogOutcome:
         """PM-04: переключает FSM в режим ожидания новой даты/времени для поста.
 
         ID поста сохраняется в черновике (RESCHEDULE_POST_ID_KEY). Сервис НЕ проверяет
@@ -324,9 +466,7 @@ class DialogService:
         RescheduleService при вводе даты (защита от подмены callback data, §7).
         """
         async with self._locks[user_id, chat_id]:
-            await self._store.set_state(
-                user_id, chat_id, DialogState.WAITING_RESCHEDULE_DATETIME
-            )
+            await self._store.set_state(user_id, chat_id, DialogState.WAITING_RESCHEDULE_DATETIME)
             await self._store.set_draft(
                 user_id,
                 chat_id,
@@ -355,9 +495,7 @@ class DialogService:
             )
             await self._store.set_state(user_id, chat_id, DialogState.IDLE)
             await self._store.set_draft(user_id, chat_id, {})
-            return DialogOutcome(
-                DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE
-            )
+            return DialogOutcome(DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE)
         post_id = int(raw_post_id)
         zone_name = await self._users.timezone_of(user_id)
         try:
@@ -379,9 +517,7 @@ class DialogService:
         if user is None or self._reschedule is None:
             await self._store.set_state(user_id, chat_id, DialogState.IDLE)
             await self._store.set_draft(user_id, chat_id, {})
-            return DialogOutcome(
-                DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE
-            )
+            return DialogOutcome(DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE)
         try:
             post = await self._reschedule.reschedule(
                 post_id=post_id,
@@ -396,9 +532,7 @@ class DialogService:
             )
             await self._store.set_state(user_id, chat_id, DialogState.IDLE)
             await self._store.set_draft(user_id, chat_id, {})
-            return DialogOutcome(
-                DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE
-            )
+            return DialogOutcome(DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE)
 
         target = DialogState.IDLE
         await self._store.set_state(user_id, chat_id, target)

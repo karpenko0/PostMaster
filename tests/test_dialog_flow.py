@@ -1,4 +1,4 @@
-"""Сценарий создания публикации через Long Polling и fake Telegram API (SPEC-003, SPEC-004).
+"""Сценарий создания публикации через Long Polling и fake Telegram API (SPEC-003, SPEC-004, PM-03, PM-05).
 
 Проверяются переходы и ответы на каждом шаге, недопустимые сообщения и работа только в личных
 чатах. Шаг фото дополнительно проверяет метаданные в FSM (IT-004-01…IT-004-03), отсутствие
@@ -21,14 +21,24 @@ from harness import (
 )
 from postmaster.app import Application
 from postmaster.domain.dialog import DialogState
-from postmaster.handlers.dialog import HINT_BY_STATE, INVALID_FORMAT_TEXT, PHOTO_ACCEPTED_TEXT
+from postmaster.handlers.dialog import (
+    HINT_BY_STATE,
+    INVALID_FORMAT_TEXT,
+    PUBLICATION_TYPE_PROMPT_TEXT,
+    REMINDER_BUTTON,
+)
+from postmaster.handlers.dialog import PHOTO_ACCEPTED_TEXT  # re-export обратной совместимости
 
 IDLE = DialogState.IDLE
 WAITING_PHOTO = DialogState.WAITING_PHOTO
+WAITING_PUBLICATION_TYPE = DialogState.WAITING_PUBLICATION_TYPE
 WAITING_DATETIME = DialogState.WAITING_DATETIME
+WAITING_CONFIRMATION = DialogState.WAITING_CONFIRMATION
 
 # Ответ §26 SPEC-004: бот просит фотографию вместо другого сообщения (AC-004-08, ERR-004-01).
 PHOTO_REQUEST_TEXT = "Отправь фотографию, которую нужно опубликовать."
+
+CONFIRM_CALLBACK_DATA = "pm05:confirm"
 
 
 async def _start(app: Application, fake: FakeTelegram, user_id: int = 42) -> None:
@@ -44,27 +54,49 @@ async def _reply_count(fake: FakeTelegram, expected: int) -> None:
 async def _send_photo(app: Application, fake: FakeTelegram, file_id: str) -> None:
     fake.add_photo_message(file_id, chat_id=42, user_id=42)
     await wait_until(lambda: len(fake.sent_messages) >= 2)
+    # PM-03: после фото бот предлагает выбрать тип публикации.
+    await wait_for_state(app, 42, WAITING_PUBLICATION_TYPE)
+
+
+async def _select_reminder(app: Application, fake: FakeTelegram) -> None:
+    """PM-03: переход к шагу даты для REMINDER."""
+    fake.add_text_message(REMINDER_BUTTON, chat_id=42, user_id=42)
     await wait_for_state(app, 42, WAITING_DATETIME)
+
+
+async def _confirm(app: Application, fake: FakeTelegram) -> None:
+    """PM-05: нажать «✅ Подтвердить» в превью."""
+    before = len(fake.sent_messages)
+    fake.add_callback_query(CONFIRM_CALLBACK_DATA, chat_id=42, user_id=42)
+    await wait_until(lambda: len(fake.sent_messages) >= before + 1)
+    await wait_for_state(app, 42, IDLE)
 
 
 async def test_full_scenario_creates_post_and_returns_to_idle(
     running_app: Application, fake_telegram: FakeTelegram
 ) -> None:
-    # US-01, AC-01, AC-03, TC-01: /start → фото → дата → IDLE. E2E-004-01 на шаге фото.
+    # US-01, AC-01, AC-03, TC-01, PM-03, PM-05: /start → фото → тип → дата → preview → confirm.
     await _start(running_app, fake_telegram)
 
     fake_telegram.add_photo_message("photo-1", chat_id=42, user_id=42)
     await _reply_count(fake_telegram, 2)
-    # §25 SPEC-004: точный текст с подсказкой формата (AC-004-07).
-    assert fake_telegram.sent_messages[1]["text"] == PHOTO_ACCEPTED_TEXT
-    assert "Теперь укажи дату и время публикации." in fake_telegram.sent_messages[1]["text"]
-    assert "ДД.ММ.ГГГГ ЧЧ:ММ" in fake_telegram.sent_messages[1]["text"]
-    await wait_for_state(running_app, 42, WAITING_DATETIME)
+    # PM-03: после фото бот спрашивает тип публикации.
+    assert fake_telegram.sent_messages[1]["text"] == PUBLICATION_TYPE_PROMPT_TEXT
+    await wait_for_state(running_app, 42, WAITING_PUBLICATION_TYPE)
 
+    await _select_reminder(running_app, fake_telegram)
+
+    # PM-05: после валидной даты появляется preview (sendPhoto), текст подтверждения приходит
+    # только после нажатия «✅ Подтвердить».
     date_text = future_date_text()
     fake_telegram.add_text_message(date_text, chat_id=42, user_id=42)
-    await _reply_count(fake_telegram, 3)
-    created = fake_telegram.sent_messages[2]["text"]
+    await wait_until(lambda: len(fake_telegram.sent_photos) >= 1)
+    await wait_for_state(running_app, 42, WAITING_CONFIRMATION)
+
+    before_confirm = len(fake_telegram.sent_messages)
+    fake_telegram.add_callback_query(CONFIRM_CALLBACK_DATA, chat_id=42, user_id=42)
+    await wait_until(lambda: len(fake_telegram.sent_messages) >= before_confirm + 1)
+    created = fake_telegram.sent_messages[-1]["text"]
     assert created.startswith("✅ Принято!\n\nФото запланировано:")
     assert f"⏰ {date_text[-5:]}" in created
     await wait_for_state(running_app, 42, IDLE)
@@ -108,7 +140,7 @@ async def test_photo_leaves_no_image_files_on_disk(
 async def test_photo_does_not_touch_database(
     running_app: Application, fake_telegram: FakeTelegram, tmp_path: Path
 ) -> None:
-    # BR-004-08: фотография сама по себе не создаёт публикацию в БД. Диалог подключится в SPEC-009.
+    # BR-004-08: фотография сама по себе не создаёт публикацию в БД (PM-05-BR-02).
     await _start(running_app, fake_telegram)
     before = db_snapshot(db_path(tmp_path))
 
@@ -189,11 +221,13 @@ async def test_invalid_date_keeps_waiting_datetime(
     # D7, TC-02: несуществующая дата не сбивает шаг.
     await _start(running_app, fake_telegram)
     await _send_photo(running_app, fake_telegram, "photo-1")
+    await _select_reminder(running_app, fake_telegram)
 
     fake_telegram.add_text_message("31.02.2026 10:00", chat_id=42, user_id=42)
-    await _reply_count(fake_telegram, 3)
+    await _reply_count(fake_telegram, 4)
 
-    assert fake_telegram.sent_messages[2]["text"] == INVALID_FORMAT_TEXT
+    # Сообщения: 0 — приветствие, 1 — выбор типа, 2 — запрос даты, 3 — ошибка формата.
+    assert fake_telegram.sent_messages[3]["text"] == INVALID_FORMAT_TEXT
     await wait_for_state(running_app, 42, WAITING_DATETIME)
 
 
@@ -203,34 +237,39 @@ async def test_non_photo_media_on_date_step_gets_date_hint(
     # TC-02: документ на шаге даты недопустим.
     await _start(running_app, fake_telegram)
     await _send_photo(running_app, fake_telegram, "photo-1")
+    await _select_reminder(running_app, fake_telegram)
 
     fake_telegram.add_media_message("document", chat_id=42, user_id=42)
-    await _reply_count(fake_telegram, 3)
+    await _reply_count(fake_telegram, 4)
 
-    assert fake_telegram.sent_messages[2]["text"] == HINT_BY_STATE[WAITING_DATETIME]
+    assert fake_telegram.sent_messages[3]["text"] == HINT_BY_STATE[WAITING_DATETIME]
     await wait_for_state(running_app, 42, WAITING_DATETIME)
 
 
 async def test_repeated_photo_replaces_previous_and_asks_date_again(
     running_app: Application, fake_telegram: FakeTelegram
 ) -> None:
-    # BR-004-09, AC-004-09, IT-004-03: новое фото заменяет старое, дата запрашивается снова.
+    # BR-004-09, AC-004-09, IT-004-03: новое фото заменяет старое, тип сохраняется (PM-03).
     await _start(running_app, fake_telegram)
     await _send_photo(running_app, fake_telegram, "photo-1")
+    await _select_reminder(running_app, fake_telegram)
     assert (await draft_data(running_app, 42))["telegram_file_id"] == "photo-1"
 
     fake_telegram.add_photo_message("photo-2", chat_id=42, user_id=42)
-    await _reply_count(fake_telegram, 3)
+    await _reply_count(fake_telegram, 4)
 
-    assert fake_telegram.sent_messages[2]["text"].startswith("Фото заменено. ")
+    # Сообщения: 0 — приветствие, 1 — выбор типа, 2 — запрос даты, 3 — «Фото заменено».
+    assert fake_telegram.sent_messages[3]["text"].startswith("Фото заменено. ")
     await wait_for_state(running_app, 42, WAITING_DATETIME)
-    # §27: данные предыдущего фото заменены новыми.
+    # §27: данные предыдущего фото заменены новыми; тип публикации (PM-03) сохраняется.
     assert (await draft_data(running_app, 42))["telegram_file_id"] == "photo-2"
     assert (await draft_data(running_app, 42))["telegram_file_unique_id"] == "photo-2-l"
+    assert (await draft_data(running_app, 42)).get("publication_type") == "REMINDER"
 
     fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
-    await _reply_count(fake_telegram, 4)
-    await wait_for_state(running_app, 42, IDLE)
+    await wait_until(lambda: len(fake_telegram.sent_photos) >= 1)
+    await wait_for_state(running_app, 42, WAITING_CONFIRMATION)
+    await _confirm(running_app, fake_telegram)
 
 
 async def test_start_during_scenario_discards_photo_and_restarts(
@@ -249,7 +288,7 @@ async def test_start_during_scenario_discards_photo_and_restarts(
     await _reply_count(fake_telegram, 4)
 
     # После нового /start фото принимается как первое, а не заменяет прежнее.
-    assert fake_telegram.sent_messages[3]["text"] == PHOTO_ACCEPTED_TEXT
+    assert fake_telegram.sent_messages[3]["text"] == PUBLICATION_TYPE_PROMPT_TEXT
     assert (await draft_data(running_app, 42))["telegram_file_id"] == "photo-2"
 
 

@@ -1,6 +1,9 @@
 """Таблица переходов сценария и разбор даты: AC-01, AC-02, TC-01, BR-01…BR-03 (SPEC-003).
 
 Проверка не требует Telegram и базы данных. Каждая пара «состояние — событие» проверяется явно.
+
+Таблица переходов расширена PM-03 (выбор типа публикации), PM-04 (перенос) и
+PM-05 (предварительный просмотр перед сохранением).
 """
 
 import itertools
@@ -14,29 +17,61 @@ from postmaster.domain.schedule import parse_local_datetime
 
 IDLE = DialogState.IDLE
 WAITING_PHOTO = DialogState.WAITING_PHOTO
+WAITING_PUBLICATION_TYPE = DialogState.WAITING_PUBLICATION_TYPE
+WAITING_TARGET = DialogState.WAITING_TARGET
 WAITING_DATETIME = DialogState.WAITING_DATETIME
+WAITING_CONFIRMATION = DialogState.WAITING_CONFIRMATION
+WAITING_RESCHEDULE = DialogState.WAITING_RESCHEDULE_DATETIME
+
 START = DialogEvent.START
 PHOTO = DialogEvent.PHOTO
 VALID_DATETIME = DialogEvent.VALID_DATETIME
+CONFIRM_DATETIME = DialogEvent.CONFIRM_DATETIME
+REMINDER = DialogEvent.REMINDER
+TELEGRAM = DialogEvent.TELEGRAM
+VALID_TARGET = DialogEvent.VALID_TARGET
+RESCHEDULE_VALID = DialogEvent.RESCHEDULE_VALID
 
-# FSM-контракт SPEC-003 и расширение SPEC-009: новое фото из IDLE начинает сценарий.
+# FSM-контракт SPEC-003 и расширения SPEC-009, PM-03, PM-04, PM-05.
 SCENARIO = {
     (IDLE, START): WAITING_PHOTO,
-    (IDLE, PHOTO): WAITING_DATETIME,
+    (IDLE, PHOTO): WAITING_PUBLICATION_TYPE,
     (WAITING_PHOTO, START): WAITING_PHOTO,
+    (WAITING_PHOTO, PHOTO): WAITING_PUBLICATION_TYPE,
+    (WAITING_PUBLICATION_TYPE, START): WAITING_PHOTO,
+    (WAITING_PUBLICATION_TYPE, PHOTO): WAITING_PUBLICATION_TYPE,
+    (WAITING_PUBLICATION_TYPE, REMINDER): WAITING_DATETIME,
+    (WAITING_PUBLICATION_TYPE, TELEGRAM): WAITING_TARGET,
+    (WAITING_TARGET, START): WAITING_PHOTO,
+    (WAITING_TARGET, PHOTO): WAITING_TARGET,
+    (WAITING_TARGET, VALID_TARGET): WAITING_DATETIME,
     (WAITING_DATETIME, START): WAITING_PHOTO,
-    (WAITING_PHOTO, PHOTO): WAITING_DATETIME,
     (WAITING_DATETIME, PHOTO): WAITING_DATETIME,
-    (WAITING_DATETIME, VALID_DATETIME): IDLE,
+    # PM-05: валидная дата ведёт на предварительный просмотр, а не создаёт пост.
+    (WAITING_DATETIME, VALID_DATETIME): WAITING_CONFIRMATION,
+    # PM-05: подтверждение создаёт публикацию и завершает сценарий.
+    (WAITING_CONFIRMATION, START): WAITING_PHOTO,
+    (WAITING_CONFIRMATION, CONFIRM_DATETIME): IDLE,
+    # PM-04: перенос публикации на новое время.
+    (WAITING_RESCHEDULE, START): WAITING_PHOTO,
+    (WAITING_RESCHEDULE, RESCHEDULE_VALID): IDLE,
 }
 
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
 MOSCOW = ZoneInfo("Europe/Moscow")
 
 
-def test_dialog_has_exactly_three_states() -> None:
-    # AC-01: все три состояния реализованы.
-    assert {state.value for state in DialogState} == {"IDLE", "WAITING_PHOTO", "WAITING_DATETIME"}
+def test_dialog_states_are_defined() -> None:
+    # AC-01: все состояния сценария реализованы.
+    assert {state.value for state in DialogState} == {
+        "IDLE",
+        "WAITING_PHOTO",
+        "WAITING_PUBLICATION_TYPE",
+        "WAITING_TARGET",
+        "WAITING_DATETIME",
+        "WAITING_CONFIRMATION",
+        "WAITING_RESCHEDULE_DATETIME",
+    }
 
 
 @pytest.mark.parametrize(
@@ -54,13 +89,28 @@ def test_transition_table_matches_scenario_exactly() -> None:
 
 @pytest.mark.parametrize(
     ("state", "expected"),
-    [(IDLE, WAITING_PHOTO), (WAITING_PHOTO, WAITING_PHOTO), (WAITING_DATETIME, WAITING_PHOTO)],
+    [
+        (IDLE, WAITING_PHOTO),
+        (WAITING_PHOTO, WAITING_PHOTO),
+        (WAITING_DATETIME, WAITING_PHOTO),
+        (WAITING_CONFIRMATION, WAITING_PHOTO),
+    ],
 )
 def test_start_leads_to_waiting_photo_from_every_state(
     state: DialogState, expected: DialogState
 ) -> None:
     # BR-01: /start переводит в WAITING_PHOTO независимо от текущего шага.
     assert next_state(state, START) == expected
+
+
+def test_valid_datetime_leads_to_confirmation() -> None:
+    # PM-05: валидная дата включает шаг подтверждения, пост ещё не создан.
+    assert next_state(WAITING_DATETIME, VALID_DATETIME) == WAITING_CONFIRMATION
+
+
+def test_confirmation_returns_to_idle() -> None:
+    # PM-05: подтверждение завершает сценарий.
+    assert next_state(WAITING_CONFIRMATION, CONFIRM_DATETIME) == IDLE
 
 
 def test_valid_local_date_is_converted_to_utc() -> None:

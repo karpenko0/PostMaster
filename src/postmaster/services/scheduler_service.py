@@ -11,7 +11,6 @@ from typing import Protocol
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from postmaster.domain.post import PostNotFoundError, PostStatus
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.utils.logging_config import (
     EVENT_SCHEDULER_JOB_ADDED,

@@ -23,6 +23,12 @@ async def test_user_can_schedule_both_types(
         fake_telegram.add_text_message(value, chat_id=42, user_id=42)
         await wait_until(lambda: len(fake_telegram.sent_messages) >= count)
 
+    async def confirm():
+        # PM-05: confirm создаёт публикацию и отвечает сообщением.
+        before = len(fake_telegram.sent_messages)
+        fake_telegram.add_callback_query("pm05:confirm", chat_id=42, user_id=42)
+        await wait_until(lambda: len(fake_telegram.sent_messages) >= before + 1)
+
     await text("/start", 1)
     fake_telegram.add_photo_message("one", chat_id=42, user_id=42)
     await wait_until(lambda: len(fake_telegram.sent_messages) >= 2)
@@ -31,7 +37,12 @@ async def test_user_can_schedule_both_types(
     await wait_for_state(running_app, 42, DialogState.WAITING_PUBLICATION_TYPE)
     await text(REMINDER_BUTTON, 4)
     await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
-    await text(future_date_text(), 5)
+    # PM-05: валидная дата показывает preview через sendPhoto — счётчик текстовых
+    # сообщений не растёт. Дожидаемся preview-фото и состояния WAITING_CONFIRMATION.
+    fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
+    await wait_until(lambda: len(fake_telegram.sent_photos) >= 1)
+    await wait_for_state(running_app, 42, DialogState.WAITING_CONFIRMATION)
+    await confirm()
     await wait_for_state(running_app, 42, DialogState.IDLE)
     fake_telegram.add_photo_message("two", chat_id=42, user_id=42)
     await wait_until(lambda: len(fake_telegram.sent_messages) >= 6)
@@ -40,7 +51,10 @@ async def test_user_can_schedule_both_types(
     await text("not a channel", 8)
     await wait_for_state(running_app, 42, DialogState.WAITING_TARGET)
     await text("@Channel_name", 9)
-    await text(future_date_text(), 10)
+    fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
+    await wait_until(lambda: len(fake_telegram.sent_photos) >= 2)
+    await wait_for_state(running_app, 42, DialogState.WAITING_CONFIRMATION)
+    await confirm()
     await wait_for_state(running_app, 42, DialogState.IDLE)
     with sqlite3.connect(db_path(tmp_path)) as db:
         rows = db.execute("SELECT publication_type, target_id FROM posts ORDER BY id").fetchall()
