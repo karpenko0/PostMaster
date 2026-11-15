@@ -1,8 +1,9 @@
-"""Сценарий создания публикации через Long Polling и fake Telegram API (SPEC-003, SPEC-004, PM-03, PM-05).
+"""Сценарий создания публикации через Long Polling и fake Telegram API.
 
-Проверяются переходы и ответы на каждом шаге, недопустимые сообщения и работа только в личных
-чатах. Шаг фото дополнительно проверяет метаданные в FSM (IT-004-01…IT-004-03), отсутствие
-файлов изображений на диске (AC-004-05) и отсутствие записей в БД (BR-004-08).
+SPEC-003, SPEC-004, PM-03, PM-05, PM-06. Проверяются переходы и ответы на каждом шаге,
+недопустимые сообщения и работа только в личных чатах. Шаг фото дополнительно проверяет
+метаданные в FSM (IT-004-01…IT-004-03), отсутствие файлов изображений на диске
+(AC-004-05) и отсутствие записей Post в БД (BR-004-08).
 """
 
 import asyncio
@@ -15,6 +16,7 @@ from harness import (
     db_snapshot,
     draft_data,
     future_date_text,
+    meaningful_draft,
     users_rows,
     wait_for_state,
     wait_until,
@@ -24,10 +26,13 @@ from postmaster.domain.dialog import DialogState
 from postmaster.handlers.dialog import (
     HINT_BY_STATE,
     INVALID_FORMAT_TEXT,
+    PHOTO_ACCEPTED_TEXT,
     PUBLICATION_TYPE_PROMPT_TEXT,
     REMINDER_BUTTON,
 )
-from postmaster.handlers.dialog import PHOTO_ACCEPTED_TEXT  # re-export обратной совместимости
+
+# Обратная совместимость: текст «фото получил» остаётся доступным из handlers.
+assert PHOTO_ACCEPTED_TEXT.startswith("📸 Фото получил!")
 
 IDLE = DialogState.IDLE
 WAITING_PHOTO = DialogState.WAITING_PHOTO
@@ -111,7 +116,7 @@ async def test_photo_step_saves_metadata_to_fsm(
     await _send_photo(running_app, fake_telegram, "photo-1")
 
     # Максимальный размер из fake Telegram: 1280×960, file_size 150000 (AC-004-03).
-    assert await draft_data(running_app, 42) == {
+    assert meaningful_draft(await draft_data(running_app, 42)) == {
         "telegram_file_id": "photo-1",
         "telegram_file_unique_id": "photo-1-l",
         "file_size": "150000",
@@ -146,7 +151,10 @@ async def test_photo_does_not_touch_database(
 
     await _send_photo(running_app, fake_telegram, "photo-1")
 
-    assert db_snapshot(db_path(tmp_path)) == before
+    after = db_snapshot(db_path(tmp_path))
+    # PM-06 / BUG-07: черновик теперь персистентный (таблица dialog_states), поэтому
+    # сравниваем таблицу публикаций: фото не должно создавать Post.
+    assert after["posts"] == before["posts"]
 
 
 async def test_replies_never_show_file_identifiers(
@@ -199,7 +207,7 @@ async def test_empty_photo_array_asks_photo_and_keeps_state(
 
     assert fake_telegram.sent_messages[1]["text"] == PHOTO_REQUEST_TEXT
     await wait_for_state(running_app, 42, WAITING_PHOTO)
-    assert await draft_data(running_app, 42) == {}
+    assert meaningful_draft(await draft_data(running_app, 42)) == {}
 
 
 async def test_valid_date_before_photo_does_not_create_post(

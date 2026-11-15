@@ -45,13 +45,17 @@ ALLOWED_LAYER_DEPENDENCIES: dict[str, frozenset[str]] = {
     "services": frozenset({"domain", "repositories", "publishers", "utils"}),
     "handlers": frozenset({"domain", "services", "utils"}),
     "app": ALL_LAYERS,
+    # PM-06: CLI миграций — точка входа, как app/__main__: связывает config и database.
+    "migrate": frozenset({"config", "database"}),
     "__main__": frozenset({"app"}),
     "root": frozenset(),
 }
 
 # Внешние библиотеки и слои, где их можно импортировать (BR-01, BR-02, BR-04).
 THIRD_PARTY_ALLOWED_LAYERS: dict[str, frozenset[str]] = {
-    "telebot": frozenset({"bot", "handlers", "publishers", "app"}),
+    # PM-06 / BUG-07: персистентное хранилище состояний реализует контракт
+    # StateStorageBase pyTelegramBotAPI в слое repositories (там разрешены SQLAlchemy и модели).
+    "telebot": frozenset({"bot", "handlers", "publishers", "repositories", "app"}),
     "apscheduler": frozenset({"services", "app"}),
     "sqlalchemy": frozenset({"database", "repositories", "app"}),
     "aiosqlite": frozenset({"database"}),

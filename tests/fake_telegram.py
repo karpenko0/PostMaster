@@ -310,7 +310,28 @@ class FakeTelegram:
         chat_id = params.get("chat_id", "")
         photo = params.get("photo", "")
         caption = params.get("caption")
-        self.sent_photos.append({"chat_id": chat_id, "photo": photo, "caption": caption})
+        reply_markup_raw = params.get("reply_markup")
+        photo_entry: dict[str, str | None] = {
+            "chat_id": chat_id,
+            "photo": photo,
+            "caption": caption,
+        }
+        # parse_mode добавляется только когда он передан: контракт прежних тестов сохранён.
+        if params.get("parse_mode") is not None:
+            photo_entry["parse_mode"] = params["parse_mode"]
+        self.sent_photos.append(photo_entry)
+        # PM-06: превью приходит через sendPhoto — inline-клавиатуру тоже запоминаем.
+        if reply_markup_raw:
+            try:
+                self.sent_inline_markups.append(
+                    {
+                        "chat_id": chat_id,
+                        "text": caption or "",
+                        "reply_markup": json.loads(reply_markup_raw),
+                    }
+                )
+            except (ValueError, TypeError):
+                pass
         self.outbound_events.append(
             {"method": "sendPhoto", "chat_id": chat_id, "photo": photo, "caption": caption}
         )

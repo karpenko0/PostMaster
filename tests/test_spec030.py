@@ -307,7 +307,8 @@ def test_backup_does_not_include_env_file(source_db: Path, tmp_path: Path) -> No
 
     assert destination.read_bytes()[:16] == b"SQLite format 3\x00"
     assert TEST_TOKEN.encode() not in destination.read_bytes()
-    # В backup нет таблицы/данных из .env — только users и posts.
+    # В backup нет таблицы/данных из .env — только таблицы приложения.
+    # PM-06 / BUG-07: dialog_states хранит персистентный FSM и черновики.
     with sqlite3.connect(str(destination)) as conn:
         tables = {
             row[0]
@@ -315,7 +316,8 @@ def test_backup_does_not_include_env_file(source_db: Path, tmp_path: Path) -> No
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-    assert tables == {"users", "posts"}
+    # schema_version — журнал применённых миграций (PM-06), часть схемы приложения.
+    assert tables == {"users", "posts", "dialog_states", "schema_version"}
 
 
 # === failed destination (SPEC-030 §8) ======================================

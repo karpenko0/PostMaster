@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from telebot.async_telebot import AsyncTeleBot
 from telebot.asyncio_helper import ApiTelegramException
 
-from postmaster.bot.dialog_store import TelebotDialogStore
 from postmaster.bot.factory import close_bot_session, create_bot
 from postmaster.bot.transport import PollingTransport, Transport
 from postmaster.config import ConfigError, Settings, load_settings
@@ -35,7 +34,9 @@ from postmaster.publishers.base import BotTelegramClient
 from postmaster.publishers.reminder import ReminderPublisher
 from postmaster.publishers.resolver import PublisherResolver
 from postmaster.publishers.telegram import TelegramPublisher
+from postmaster.repositories.dialog_state_repository import DialogStateRepository
 from postmaster.repositories.post_repository import PostRepository
+from postmaster.repositories.state_storage import SqlAlchemyStateStorage
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.cancel_service import CancelService
 from postmaster.services.dialog_service import DialogService
@@ -98,6 +99,9 @@ class Application:
         self._recovery_service: RecoveryService | None = None
         self._missed_post_handler: MissedPostHandler | None = None
         self._health_reporter = health_reporter
+        # PM-06 / BUG-07: персистентное хранилище FSM и диалог для обслуживания TTL.
+        self._state_storage: SqlAlchemyStateStorage | None = None
+        self._dialog_service: DialogService | None = None
 
     @property
     def bot(self) -> AsyncTeleBot:
@@ -115,7 +119,10 @@ class Application:
             default_timezone=settings.default_timezone,
         )
         post_repository = PostRepository(session_factory)
-        bot = create_bot(settings.bot_token.get_secret_value())
+        # PM-06 / BUG-07: состояние диалога и черновики хранятся в БД, а не в памяти.
+        # telebot получает то же персистентное хранилище, поэтому FSM переживает рестарт.
+        state_storage = SqlAlchemyStateStorage(session_factory)
+        bot = create_bot(settings.bot_token.get_secret_value(), state_storage=state_storage)
         telegram_client = BotTelegramClient(bot)
         reminder_publisher = ReminderPublisher(
             telegram_client=telegram_client,
@@ -148,7 +155,7 @@ class Application:
             scheduler=scheduler,
         )
         dialog_service = DialogService(
-            TelebotDialogStore(bot),
+            DialogStateRepository(session_factory),
             user_service=user_service,
             post_service=PostService(
                 post_repository,
@@ -188,6 +195,8 @@ class Application:
         )
         instance._recovery_service = recovery_service
         instance._missed_post_handler = missed_post_handler
+        instance._state_storage = state_storage
+        instance._dialog_service = dialog_service
         return instance
 
     async def startup(self) -> None:
@@ -200,6 +209,13 @@ class Application:
                 "база данных недоступна или не готова, проверьте DATABASE_URL"
             ) from None
         self._scheduler.start()
+        # PM-06 / BUG-07: TTL незавершённых черновиков. Просроченные строки удаляются
+        # до Recovery, чтобы восстановление видело только актуальные данные.
+        if self._state_storage is not None:
+            try:
+                await self._state_storage.purge_expired()
+            except Exception:
+                logger.warning("Не удалось очистить просроченные черновики", exc_info=False)
         # Восстановление заданий выполняется после запуска Scheduler,
         # чтобы schedule_post мог регистрировать задания.
         if self._recovery_service is not None:

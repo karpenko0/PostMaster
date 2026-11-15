@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from postmaster.database.models import PostModel, UserModel
@@ -66,6 +67,7 @@ def _to_domain(model: PostModel) -> Post:
         updated_at=_from_storage(model.updated_at),
         published_at=None if model.published_at is None else _from_storage(model.published_at),
         caption=model.caption,
+        draft_id=getattr(model, "draft_id", None),
     )
 
 
@@ -86,9 +88,17 @@ class PostRepository:
         publication_type: PublicationType,
         target_id: str | None = None,
         caption: str | None = None,
+        draft_id: str | None = None,
         now: datetime | None = None,
     ) -> Post:
-        """Создаёт одну PENDING-запись, связанную с users.id (RT-008-01, ERR-008-01…05)."""
+        """Создаёт одну PENDING-запись, связанную с users.id (RT-008-01, ERR-008-01…05).
+
+        PM-06 / BUG-02: ``draft_id`` — постоянный ключ идемпотентности подтверждения.
+        Если запись с таким draft_id уже есть (повторный callback, рестарт, второй
+        экземпляр приложения), создаётся не новая публикация, а возвращается существующая.
+        Защита опирается на уникальный индекс ``ux_posts_draft_id`` в БД, поэтому
+        работает и между процессами.
+        """
         if not telegram_file_id or not telegram_file_id.strip():
             raise ValueError("telegram_file_id обязателен")
         if not telegram_file_unique_id or not telegram_file_unique_id.strip():
@@ -99,27 +109,48 @@ class PostRepository:
         kind = PublicationType(publication_type)
         if kind == PublicationType.TELEGRAM and (not target_id or not target_id.strip()):
             raise ValueError("для TELEGRAM требуется target_id")
-        async with self._session_factory() as session, session.begin():
-            if await session.get(UserModel, user_id) is None:
-                raise UserNotFoundError("пользователь для публикации не найден")
-            model = PostModel(
-                user_id=user_id,
-                telegram_file_id=telegram_file_id,
-                telegram_file_unique_id=telegram_file_unique_id,
-                scheduled_at_utc=when,
-                timezone=timezone,
-                status=PostStatus.PENDING.value,
-                publication_type=kind.value,
-                target_id=target_id,
-                error_message=None,
-                created_at=timestamp,
-                updated_at=timestamp,
-                published_at=None,
-                caption=caption,
+        if draft_id is not None and draft_id.strip():
+            existing = await self.get_by_draft_id(draft_id)
+            if existing is not None:
+                logger.info(
+                    "Post creation deduplicated draft_id=%s post_id=%s", draft_id, existing.id
+                )
+                return existing
+        try:
+            async with self._session_factory() as session, session.begin():
+                if await session.get(UserModel, user_id) is None:
+                    raise UserNotFoundError("пользователь для публикации не найден")
+                model = PostModel(
+                    user_id=user_id,
+                    telegram_file_id=telegram_file_id,
+                    telegram_file_unique_id=telegram_file_unique_id,
+                    scheduled_at_utc=when,
+                    timezone=timezone,
+                    status=PostStatus.PENDING.value,
+                    publication_type=kind.value,
+                    target_id=target_id,
+                    error_message=None,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                    published_at=None,
+                    caption=caption,
+                    draft_id=draft_id,
+                )
+                session.add(model)
+                await session.flush()
+            post = _to_domain(model)
+        except IntegrityError:
+            # Конкурентный запрос (другой callback или другой процесс) успел вставить
+            # запись с тем же draft_id. Возвращаем уже существующую публикацию.
+            if draft_id is None or not draft_id.strip():
+                raise
+            existing = await self.get_by_draft_id(draft_id)
+            if existing is None:
+                raise
+            logger.info(
+                "Post creation conflict resolved by draft_id=%s post_id=%s", draft_id, existing.id
             )
-            session.add(model)
-            await session.flush()
-        post = _to_domain(model)
+            return existing
         log_event(
             logger,
             EVENT_POST_CREATED,
@@ -133,6 +164,15 @@ class PostRepository:
         """Получает запись без авторизации; для пользовательской операции проверьте владельца."""
         async with self._session_factory() as session:
             model = await session.get(PostModel, post_id)
+            return None if model is None else _to_domain(model)
+
+    async def get_by_draft_id(self, draft_id: str) -> Post | None:
+        """Публикация, созданная по этому draft_id (PM-06, ключ идемпотентности)."""
+        if not draft_id or not draft_id.strip():
+            return None
+        statement = select(PostModel).where(PostModel.draft_id == draft_id)
+        async with self._session_factory() as session:
+            model = (await session.scalars(statement)).first()
             return None if model is None else _to_domain(model)
 
     async def get_user_post(self, post_id: int, user_id: int) -> Post | None:
@@ -411,6 +451,7 @@ class PostRepository:
             )
             return True
         return False
+
     async def reschedule_post(
         self,
         post_id: int,

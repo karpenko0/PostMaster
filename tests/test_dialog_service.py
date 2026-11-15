@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from harness import future_date_text
+from harness import future_date_text, meaningful_draft
 from postmaster.domain.dialog import DialogState
 from postmaster.domain.photo import PhotoData
 from postmaster.domain.post import Post, PublicationType
@@ -197,7 +197,9 @@ async def test_start_sets_waiting_photo_and_empty_draft(
 
     assert outcome.kind == DialogOutcomeKind.STARTED
     assert store.states[USER, CHAT] == WAITING_PHOTO
-    assert store.drafts[USER, CHAT] == {}
+    # PM-06: новый черновик содержит только draft_id — данные прежнего сценария стёрты.
+    assert meaningful_draft(store.drafts[USER, CHAT]) == {}
+    assert DRAFT_ID_KEY in store.drafts[USER, CHAT]
 
 
 @pytest.mark.parametrize(
@@ -214,7 +216,7 @@ async def test_start_from_any_state_begins_new_scenario(
     outcome = await service.start(USER, CHAT)
 
     assert outcome.state == WAITING_PHOTO
-    assert store.drafts[USER, CHAT] == {}
+    assert meaningful_draft(store.drafts[USER, CHAT]) == {}
 
 
 async def test_photo_moves_to_publication_type_and_keeps_file(
@@ -228,7 +230,7 @@ async def test_photo_moves_to_publication_type_and_keeps_file(
     assert outcome.kind == DialogOutcomeKind.PHOTO_ACCEPTED
     assert outcome.state == WAITING_PUBLICATION_TYPE
     assert store.states[USER, CHAT] == WAITING_PUBLICATION_TYPE
-    assert store.drafts[USER, CHAT] == draft_of("photo-1")
+    assert meaningful_draft(store.drafts[USER, CHAT]) == draft_of("photo-1")
 
 
 async def test_photo_draft_carries_all_metadata(
@@ -243,7 +245,7 @@ async def test_photo_draft_carries_all_metadata(
         photo("photo-1", unique="uid-77", file_size=154923, width=1280, height=1280),
     )
 
-    assert store.drafts[USER, CHAT] == draft_of(
+    assert meaningful_draft(store.drafts[USER, CHAT]) == draft_of(
         "photo-1", unique="uid-77", file_size="154923", width="1280", height="1280"
     )
 
@@ -256,7 +258,7 @@ async def test_photo_without_file_size_omits_key(
 
     await service.receive_photo(USER, CHAT, photo("photo-1", file_size=None))
 
-    assert store.drafts[USER, CHAT] == draft_of("photo-1", file_size=None)
+    assert meaningful_draft(store.drafts[USER, CHAT]) == draft_of("photo-1", file_size=None)
 
 
 async def test_new_photo_on_date_step_replaces_previous_and_asks_again(
@@ -271,7 +273,7 @@ async def test_new_photo_on_date_step_replaces_previous_and_asks_again(
     assert outcome.state == WAITING_DATETIME
     # Замена фото сохраняет выбранный тип публикации (PM-03) и перезаписывает фото.
     expected = {**draft_of("photo-2"), "publication_type": PublicationType.REMINDER.value}
-    assert store.drafts[USER, CHAT] == expected
+    assert meaningful_draft(store.drafts[USER, CHAT]) == expected
 
     await service.receive_text(USER, CHAT, future_date_text())
     await service.confirm_post(USER, CHAT)
@@ -291,7 +293,7 @@ async def test_replaced_photo_rewrites_all_metadata(
         USER, CHAT, photo("photo-b", unique="uid-b", file_size=150000, width=1280, height=960)
     )
 
-    assert store.drafts[USER, CHAT] == draft_of("photo-b", unique="uid-b")
+    assert meaningful_draft(store.drafts[USER, CHAT]) == draft_of("photo-b", unique="uid-b")
     assert "uid-a" not in store.drafts[USER, CHAT].values()
 
 
@@ -374,7 +376,7 @@ async def test_invalid_date_keeps_waiting_datetime_and_draft(
     # Черновик содержит фото + выбранный тип публикации (PM-03) — некорректная
     # дата их не трогает.
     expected = {**draft_of("photo-1"), "publication_type": PublicationType.REMINDER.value}
-    assert store.drafts[USER, CHAT] == expected
+    assert meaningful_draft(store.drafts[USER, CHAT]) == expected
     assert posts.created == []
 
 
@@ -506,4 +508,5 @@ async def test_users_do_not_share_state(service: DialogService, store: InMemoryD
 
     assert store.states[1, 1] == WAITING_PUBLICATION_TYPE
     assert store.states[2, 2] == WAITING_PHOTO
-    assert store.drafts[2, 2] == {}
+    # PM-06: у второго пользователя только собственный draft_id, данные фото не попали.
+    assert meaningful_draft(store.drafts[2, 2]) == {}

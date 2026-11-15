@@ -1,4 +1,4 @@
-"""ORM-модели таблиц PostMaster: users (SPEC-007), posts (SPEC-008).
+"""ORM-модели таблиц PostMaster: users (SPEC-007), posts (SPEC-008), dialog_states (PM-06).
 
 SQLite не сохраняет часовой пояс, поэтому даты лежат в UTC без tzinfo. Репозитории
 переводят их в обе стороны (см. repositories/user_repository.py).
@@ -62,6 +62,9 @@ class PostModel(Base):
         ),
         Index("ix_posts_user_status_scheduled", "user_id", "status", "scheduled_at_utc"),
         Index("ix_posts_status_scheduled", "status", "scheduled_at_utc"),
+        # PM-06 / BUG-02: один draft_id соответствует не более чем одному Post.
+        # NULL-значения уникальность не нарушают, поэтому старые записи совместимы.
+        Index("ux_posts_draft_id", "draft_id", unique=True),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -82,3 +85,23 @@ class PostModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # PM-06 / BUG-02: idempotency key подтверждения черновика. NULL для старых записей.
+    draft_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class DialogStateModel(Base):
+    """Таблица dialog_states: персистентное состояние FSM и черновик (PM-06 / BUG-07).
+
+    Одна строка на пару (telegram_user_id, chat_id). Черновик хранится как JSON-текст,
+    состояние — строкой FSM. expires_at реализует TTL незавершённых сценариев.
+    """
+
+    __tablename__ = "dialog_states"
+    __table_args__ = (Index("ix_dialog_states_expires_at", "expires_at"),)
+
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    draft: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

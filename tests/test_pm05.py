@@ -162,7 +162,8 @@ def test_pm05_t02_preview_telegram_shows_channel() -> None:
         caption="Новая публикация",
     )
     assert "📢 Публикация в Telegram" in text
-    assert "Канал: @my_channel" in text
+    # PM-06 / BUG-03: подчёркивание в нике канала экранируется, иначе Markdown ломается.
+    assert "Канал: @my\\_channel" in text
 
 
 def test_pm05_t03_preview_without_caption_omits_caption_line() -> None:

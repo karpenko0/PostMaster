@@ -73,6 +73,8 @@ class Post:
     error_message: str | None = None
     published_at: datetime | None = None
     caption: str | None = None
+    # PM-06 / BUG-02: ключ идемпотентности подтверждения. None у старых записей.
+    draft_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, PostStatus) or not isinstance(

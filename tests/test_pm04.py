@@ -220,9 +220,7 @@ async def test_reschedule_repository_own_pending(post_repo) -> None:
     post_id = await _create_post(repo, user_id)
     new_time = datetime.now(UTC) + timedelta(days=3)
 
-    result = await repo.reschedule_post(
-        post_id=post_id, user_id=user_id, scheduled_at_utc=new_time
-    )
+    result = await repo.reschedule_post(post_id=post_id, user_id=user_id, scheduled_at_utc=new_time)
 
     assert result is not None
     assert result.scheduled_at_utc.replace(microsecond=0) == new_time.replace(microsecond=0)
@@ -319,9 +317,7 @@ async def test_reschedule_service_happy_path(post_repo) -> None:
     scheduler = RecordingScheduler()
     service = RescheduleService(repo, scheduler)
 
-    result = await service.reschedule(
-        post_id=post_id, user_id=user_id, scheduled_at_utc=new_time
-    )
+    result = await service.reschedule(post_id=post_id, user_id=user_id, scheduled_at_utc=new_time)
 
     assert result.id == post_id
     assert any(pid == post_id for pid, _ in scheduler.scheduled)
@@ -373,9 +369,7 @@ async def test_reschedule_service_scheduler_failure_keeps_db(post_repo) -> None:
     service = RescheduleService(repo, scheduler)
     new_time = datetime.now(UTC) + timedelta(days=6)
 
-    result = await service.reschedule(
-        post_id=post_id, user_id=user_id, scheduled_at_utc=new_time
-    )
+    result = await service.reschedule(post_id=post_id, user_id=user_id, scheduled_at_utc=new_time)
 
     assert result.id == post_id
     post = await repo.get_by_id(post_id)
@@ -570,8 +564,10 @@ async def test_pm04_e2e_foreign_cancel_blocked(running_app, fake_telegram, tmp_p
 
     fake_telegram.add_callback_query("cancel:1", chat_id=601, user_id=601)
     await wait_until(
-        lambda: any("доступна" in m["text"] or "не найдена" in m["text"]
-                     for m in fake_telegram.sent_messages)
+        lambda: any(
+            "доступна" in m["text"] or "не найдена" in m["text"]
+            for m in fake_telegram.sent_messages
+        )
     )
 
     from postmaster.repositories.post_repository import PostRepository
@@ -620,10 +616,7 @@ async def test_pm04_e2e_invalid_date_reprompts(running_app, fake_telegram, tmp_p
 
     fake_telegram.add_text_message("не дата", chat_id=700, user_id=700)
     await wait_until(lambda: sum(1 for _ in fake_telegram.sent_messages) >= 3)
-    assert any(
-        "понимаю" in m["text"] or "формат" in m["text"]
-        for m in fake_telegram.sent_messages
-    )
+    assert any("понимаю" in m["text"] or "формат" in m["text"] for m in fake_telegram.sent_messages)
 
     from postmaster.repositories.post_repository import PostRepository
 

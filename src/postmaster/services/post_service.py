@@ -86,6 +86,16 @@ class PostService:
             local_datetime=local_datetime,
         )
 
+    async def find_by_draft_id(self, draft_id: str) -> Post | None:
+        """Уже созданная публикация для черновика (PM-06 / BUG-02).
+
+        Используется для восстановления после падения между commit и записью FSM,
+        а также для повторной доставки callback после перезапуска приложения.
+        """
+        if self._repository is None or not draft_id:
+            return None
+        return await self._repository.get_by_draft_id(draft_id)
+
     async def create_scheduled_post(
         self,
         *,
@@ -97,8 +107,14 @@ class PostService:
         publication_type: PublicationType | str,
         target_id: str | None = None,
         caption: str | None = None,
+        draft_id: str | None = None,
     ) -> Post:
-        """Создаёт запись и задание; возвращает только сохранённый Post."""
+        """Создаёт запись и задание; возвращает только сохранённый Post.
+
+        PM-06 / BUG-02: ``draft_id`` — постоянный ключ идемпотентности. Повторный вызов
+        с тем же draft_id не создаёт вторую публикацию, а возвращает уже сохранённую
+        (в том числе после падения между commit и обновлением FSM).
+        """
         logger.info("Post creation started user_id=%s", user_id)
         if self._repository is None or self._scheduler is None:
             raise RuntimeError("PostService требует репозиторий и Scheduler")
@@ -141,6 +157,7 @@ class PostService:
                 publication_type=kind,
                 target_id=target_id,
                 caption=caption,
+                draft_id=draft_id,
             )
         except UserNotFoundError:
             logger.error("Post creation failed user_id=%s: user not found", user_id)

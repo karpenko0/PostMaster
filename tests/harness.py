@@ -64,6 +64,16 @@ async def draft_data(app: Application, user_id: int, chat_id: int | None = None)
     return {key: str(value) for key, value in data.items()}
 
 
+# PM-06: каждый черновик получает уникальный draft_id (защита от устаревших кнопок).
+# Тесты сценария сравнивают содержательные поля черновика без этого маркера.
+PM06_DRAFT_MARKERS = ("draft_id",)
+
+
+def meaningful_draft(draft: dict[str, str]) -> dict[str, str]:
+    """Черновик без служебных PM-06 маркеров (draft_id)."""
+    return {key: value for key, value in draft.items() if key not in PM06_DRAFT_MARKERS}
+
+
 def db_snapshot(path: Path) -> dict[str, list[tuple]]:
     """Все строки всех таблиц SQLite. Снимки до и после шага сравниваются на равенство."""
     with closing(sqlite3.connect(path)) as connection:

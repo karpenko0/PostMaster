@@ -4,6 +4,7 @@
 не меняет состояние (AC-02). Модуль не зависит от Telegram и базы данных.
 """
 
+import re
 from enum import StrEnum
 
 
@@ -74,3 +75,24 @@ TRANSITIONS: dict[tuple[DialogState, DialogEvent], DialogState] = {
 def next_state(state: DialogState, event: DialogEvent) -> DialogState | None:
     """Возвращает состояние после события или None, если такой переход не разрешён."""
     return TRANSITIONS.get((state, event))
+
+
+# PM-06 / BUG-01: callback_data Telegram ограничено 64 байтами, а draft_id — UUID (36).
+# Поэтому в callback попадает короткий токен черновика — однозначный префикс draft_id.
+CALLBACK_TOKEN_LENGTH = 16
+_TOKEN_SAFE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def draft_token(draft_id: str | None) -> str:
+    """Короткий токен черновика для callback_data. Пустая строка, если draft_id нет."""
+    if not draft_id:
+        return ""
+    return _TOKEN_SAFE.sub("", str(draft_id))[:CALLBACK_TOKEN_LENGTH]
+
+
+def token_matches(draft_id: str | None, token: str | None) -> bool:
+    """Совпадает ли токен из callback с черновиком. Пустой токен совпадением не считается."""
+    if not token:
+        return False
+    expected = draft_token(draft_id)
+    return bool(expected) and expected == token

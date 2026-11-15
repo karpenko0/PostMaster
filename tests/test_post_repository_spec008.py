@@ -68,7 +68,9 @@ async def test_schema_has_all_fields_constraints_fk_and_indexes(db) -> None:
         indexes = (await session.execute(text("PRAGMA index_list(posts)"))).all()
         foreign_keys_on = (await session.execute(text("PRAGMA foreign_keys"))).scalar()
     fields = {column[1]: column for column in columns}
+    # PM-06 / BUG-02: posts.draft_id — ключ идемпотентности подтверждения черновика.
     assert set(fields) == {
+        "draft_id",
         "id",
         "user_id",
         "telegram_file_id",
