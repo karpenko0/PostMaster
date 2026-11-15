@@ -23,6 +23,9 @@ DEFAULT_HEALTH_FILE = "data/health.json"
 DEFAULT_HEALTH_MAX_AGE_SECONDS = 90
 DEFAULT_BACKUP_PATH = "data/backup.db"
 
+# Служебное значение BOT_TOKEN для команд без Telegram (миграции схемы, PM-06).
+TOKEN_NOT_REQUIRED = "not-required"
+
 # Формат токена Telegram Bot API: "<числовой id бота>:<секретная часть>".
 _TOKEN_PATTERN = re.compile(r"\d{5,}:[A-Za-z0-9_-]{20,}")
 
@@ -113,6 +116,10 @@ class Settings(BaseSettings):
     @field_validator("bot_token")
     @classmethod
     def _check_token_format(cls, value: SecretStr) -> SecretStr:
+        if value.get_secret_value() == TOKEN_NOT_REQUIRED:
+            # Служебные команды (миграции, обслуживание схемы) не обращаются к Telegram
+            # и не должны требовать BOT_TOKEN (PM-06).
+            return value
         if not _TOKEN_PATTERN.fullmatch(value.get_secret_value()):
             raise ValueError("не задан или имеет неверный формат")
         return value

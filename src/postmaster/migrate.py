@@ -13,7 +13,7 @@ import argparse
 import asyncio
 import sys
 
-from postmaster.config import ConfigError, load_settings
+from postmaster.config import TOKEN_NOT_REQUIRED, ConfigError, load_settings
 from postmaster.database.engine import create_database_engine
 from postmaster.database.migrations import (
     apply_migrations,
@@ -28,7 +28,8 @@ EXIT_CONFIG_ERROR = 2
 # Переменные окружения читает только config.Settings (SPEC-026 §1). Поэтому URL берётся
 # из настроек. Если BOT_TOKEN не задан (например, миграции в CI), достаточно DATABASE_URL
 # из того же .env — Settings создаётся с плейсхолдером токена.
-_MIGRATION_TOKEN_PLACEHOLDER = "0:placeholder-for-migrations-only"
+# Служебное значение: миграции не обращаются к Telegram и не требуют реального токена.
+_MIGRATION_TOKEN_PLACEHOLDER = TOKEN_NOT_REQUIRED
 
 
 def _database_url() -> str:

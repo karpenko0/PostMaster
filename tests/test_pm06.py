@@ -1294,3 +1294,31 @@ async def test_pm06_my_posts_pagination_beyond_limit(env) -> None:
     # Порядок — по времени публикации, без пропусков в начале списка.
     times = [post.scheduled_at_utc for post in view.posts]
     assert times == sorted(times)
+
+
+def test_migration_cli_roundtrip_without_bot_token(tmp_path: Path, monkeypatch) -> None:
+    """CLI миграций работает без BOT_TOKEN и выполняет upgrade → downgrade → upgrade.
+
+    Тест синхронный: ``migrate.main`` вызывает ``asyncio.run``, которому нужен
+    собственный event loop (внутри теста с pytest-asyncio это невозможно).
+    """
+    from postmaster import migrate
+
+    database_url = f"sqlite+aiosqlite:///{db_path(tmp_path)}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.delenv("BOT_TOKEN", raising=False)
+    monkeypatch.chdir(tmp_path.parent)
+
+    assert migrate.main(["upgrade"]) == migrate.EXIT_OK
+    assert migrate.main(["version"]) == migrate.EXIT_OK
+    assert migrate.main(["downgrade"]) == migrate.EXIT_OK
+    assert migrate.main(["upgrade"]) == migrate.EXIT_OK
+
+    async def _version() -> int:
+        engine = create_database_engine(database_url)
+        try:
+            return await schema_version(engine)
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(_version()) == MIGRATION_POSTS_DRAFT_ID.version
