@@ -32,7 +32,7 @@ from postmaster.database.schema import create_schema
 from postmaster.handlers.registry import register_handlers
 from postmaster.publishers.base import BotTelegramClient
 from postmaster.publishers.reminder import ReminderPublisher
-from postmaster.publishers.resolver import PublisherResolver
+from postmaster.publishers.resolver import DefaultPublisherResolver
 from postmaster.publishers.telegram import TelegramPublisher
 from postmaster.repositories.dialog_state_repository import DialogStateRepository
 from postmaster.repositories.post_repository import PostRepository
@@ -45,7 +45,7 @@ from postmaster.services.missed_post_handler import MissedPostHandler
 from postmaster.services.my_posts_service import MyPostsService
 from postmaster.services.photo_service import PhotoService
 from postmaster.services.post_service import PostService
-from postmaster.services.publication_service import PublicationService
+from postmaster.services.publication_service import PublicationService, RetryPolicy
 from postmaster.services.recovery_service import RecoveryService
 from postmaster.services.reschedule_service import RescheduleService
 from postmaster.services.scheduler_service import SchedulerService
@@ -63,6 +63,12 @@ from postmaster.utils.logging_config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Периодический подбор постов, вернувшихся в PENDING после временной ошибки (SPEC-022 §4).
+RETRY_SWEEP_JOB_ID = "retry:sweep"
+RETRY_SWEEP_INTERVAL_SECONDS = 60
+# Не конкурируем с заданием Scheduler, которое сработает в ближайшую минуту.
+RETRY_SWEEP_GRACE_SECONDS = 30
 
 EXIT_OK = 0
 EXIT_RUNTIME_ERROR = 1
@@ -132,13 +138,16 @@ class Application:
             telegram_client=telegram_client,
             secrets=(settings.bot_token.get_secret_value(),),
         )
-        publisher_resolver = PublisherResolver(
+        publisher_resolver = DefaultPublisherResolver(
             reminder_publisher=reminder_publisher,
             telegram_publisher=telegram_publisher,
         )
+        # SPEC-022 §4: после временного сбоя публикация повторяется по расписанию
+        # +30s/+2m/+10m, затем пост получает FAILED.
         publication_service = PublicationService(
             post_repository,
             publisher_resolver=publisher_resolver,
+            retry_policy=RetryPolicy(),
         )
         scheduler = SchedulerService(post_repository, publication_service)
 
@@ -222,10 +231,44 @@ class Application:
             report = await self._recovery_service.recover()
             if report.errors:
                 logger.warning("Recovery completed with %s errors", len(report.errors))
+            # SPEC-022 §4: посты, вернувшиеся в PENDING после временной ошибки, должны
+            # быть подобраны снова. Регистрируем периодическую задачу, а не одноразовый
+            # вызов: приложение может работать неделями, а сбой случается в любой момент.
+            self._register_retry_sweep()
         # Фоновый отчёт health check — после Scheduler и Recovery, чтобы первый
         # отчёт уже отражал запущенный Scheduler (SPEC-029).
         if self._health_reporter is not None:
             await self._health_reporter.start()
+
+    def _register_retry_sweep(self) -> None:
+        """Периодически повторяет публикацию «осиротевших» PENDING-постов (SPEC-022 §4).
+
+        Задача живёт в том же APScheduler, что и публикации: отдельный поток не нужен,
+        а ``grace_seconds`` не даёт конкурировать с заданием, которое вот-вот сработает.
+        Ошибки подбора не роняют приложение — они логируются.
+        """
+        if self._recovery_service is None:
+            return
+        scheduler = self._scheduler._scheduler  # noqa: SLF001 — общий экземпляр APScheduler
+        if scheduler.get_job(RETRY_SWEEP_JOB_ID) is not None:
+            return
+        recovery_service = self._recovery_service
+
+        async def sweep() -> None:
+            try:
+                await recovery_service.retry_pending(grace_seconds=RETRY_SWEEP_GRACE_SECONDS)
+            except Exception:
+                logger.exception("Retry sweep failed")
+
+        scheduler.add_job(
+            sweep,
+            trigger="interval",
+            seconds=RETRY_SWEEP_INTERVAL_SECONDS,
+            id=RETRY_SWEEP_JOB_ID,
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
 
     async def run(self) -> None:
         """Запускает приложение и работает до вызова stop(). Ресурсы освобождаются всегда."""

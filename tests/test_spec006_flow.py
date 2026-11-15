@@ -14,6 +14,7 @@ from postmaster.app import Application
 from postmaster.database.models import UserModel
 from postmaster.domain.dialog import DialogState
 from postmaster.services import dialog_service
+from postmaster.services.dialog_service import REMINDER_BUTTON
 from postmaster.services.post_service import PostService
 from postmaster.services.scheduler_service import SchedulerService
 
@@ -61,13 +62,23 @@ async def test_profile_timezone_fallback_conversion_and_handoff(
                     .values(timezone=stored_timezone)
                 )
         fake_telegram.add_photo_message("image", chat_id=42, user_id=42)
+        # PM-03: после фото бот спрашивает тип публикации.
+        await wait_for_state(running_app, 42, DialogState.WAITING_PUBLICATION_TYPE)
         await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
+        fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=42, user_id=42)
         await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
-        before = db_snapshot(db_path(tmp_path))
-        fake_telegram.add_text_message("07.10.2026 15:00", chat_id=42, user_id=42)
         await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+        before = db_snapshot(db_path(tmp_path))
+        # PM-05: дата показывает превью; публикация создаётся после подтверждения.
+        fake_telegram.add_text_message("07.10.2026 15:00", chat_id=42, user_id=42)
+        await wait_for_state(running_app, 42, DialogState.WAITING_CONFIRMATION)
+        await wait_until(lambda: len(fake_telegram.sent_photos) == 1)
+        preview_caption = fake_telegram.sent_photos[0]["caption"]
+        assert "• Дата: 07.10.2026" in preview_caption
+        assert f"• Часовой пояс: {resolved_timezone}" in preview_caption
+        assert db_snapshot(db_path(tmp_path))["posts"] == before["posts"]
+        fake_telegram.add_callback_query("pm05:confirm", chat_id=42, user_id=42)
         await wait_for_state(running_app, 42, DialogState.IDLE)
-        assert "📅 7 октября 2026\n⏰ 15:00" in fake_telegram.sent_messages[2]["text"]
         assert len(received) == 1
         assert received[0]["scheduled_at_utc"] == scheduled_utc
         assert received[0]["timezone"] == resolved_timezone

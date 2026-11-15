@@ -59,7 +59,11 @@ async def test_user_can_schedule_both_types(
     with sqlite3.connect(db_path(tmp_path)) as db:
         rows = db.execute("SELECT publication_type, target_id FROM posts ORDER BY id").fetchall()
     assert rows == [("REMINDER", None), ("TELEGRAM", "@channel_name")]
-    assert len(running_app._scheduler._scheduler.get_jobs()) == 2
+    # Периодический подбор retry (SPEC-022) — служебная задача, не публикация.
+    publish_jobs = [
+        job for job in running_app._scheduler._scheduler.get_jobs() if job.id.startswith("post:")
+    ]
+    assert len(publish_jobs) == 2
     # A fresh application recovers both jobs from the persisted database.
     restarted = Application.from_settings(
         Settings(
@@ -70,7 +74,10 @@ async def test_user_can_schedule_both_types(
     )
     await restarted.startup()
     try:
-        assert len(restarted._scheduler._scheduler.get_jobs()) == 2
+        restarted_jobs = [
+            job for job in restarted._scheduler._scheduler.get_jobs() if job.id.startswith("post:")
+        ]
+        assert len(restarted_jobs) == 2
         repo = restarted._scheduler._posts
         posts = await repo.list_pending()
         resolver = restarted._scheduler._publication_service.publisher_resolver

@@ -12,6 +12,7 @@ from postmaster.publishers.reminder import (
     ReminderPublisher,
 )
 from postmaster.publishers.resolver import (
+    DefaultPublisherResolver,
     InvalidPublicationTypeError,
     PublisherNotFoundError,
     PublisherResolutionError,
@@ -22,6 +23,7 @@ from postmaster.publishers.telegram import TelegramErrorCode, TelegramPublisher
 
 __all__ = [
     "BotTelegramClient",
+    "DefaultPublisherResolver",
     "InvalidPublicationTypeError",
     "PublishResult",
     "Publisher",

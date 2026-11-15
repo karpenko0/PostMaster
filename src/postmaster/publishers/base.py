@@ -13,12 +13,22 @@ from telebot.async_telebot import AsyncTeleBot
 
 @dataclass(frozen=True, slots=True)
 class PublishResult:
-    """Результат выполнения Publisher (SPEC-014 §14)."""
+    """Результат выполнения Publisher (SPEC-014 §14).
 
-    success: bool
+    Поля ``post_id``/``external_id`` заполняют Publisher'ы, которые получили ответ
+    Telegram API (SPEC-015 §21). Раньше DTO их не объявлял, поэтому
+    ``PublishResult(post_id=…, external_id=…)`` падал с ``TypeError`` и любая реальная
+    публикация завершалась FAILED (PM-07 / BUG-08). ``success`` по умолчанию True:
+    результаты без явного флага означают успешную отправку, а ошибки передаются
+    через исключения или ``success=False``.
+    """
+
+    success: bool = True
     error_code: str | None = None
     error_message: str | None = None
     retryable: bool = False
+    post_id: int | None = None
+    external_id: str | None = None
 
 
 @runtime_checkable

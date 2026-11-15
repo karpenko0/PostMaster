@@ -10,7 +10,7 @@ RecoveryService читает все PENDING-посты из БД и:
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from postmaster.domain.post import Post, PostStatus
@@ -88,6 +88,39 @@ class RecoveryService:
             errors=len(report.errors),
         )
         return report
+
+    async def retry_pending(self, *, grace_seconds: int = 0) -> int:
+        """Повторно публикует PENDING-посты, чьё время уже наступило (SPEC-022 §4).
+
+        Нужен для постов, вернувшихся в PENDING после временной ошибки: atomic claim
+        защищает от дублей, поэтому повторная попытка безопасна и идемпотентна.
+        ``grace_seconds`` откладывает повтор, чтобы не конкурировать с заданием
+        Scheduler, которое вот-вот сработает.
+
+        Returns:
+            Количество постов, которым была назначена повторная попытка.
+        """
+        now = utc_now()
+        threshold = now - timedelta(seconds=max(0, grace_seconds))
+        retried = 0
+        for post in await self._repository.list_pending():
+            if post.scheduled_at_utc > threshold:
+                continue
+            try:
+                await self._missed.handle(post.id)
+            except Exception as exc:
+                log_event(
+                    logger,
+                    EVENT_RECOVERY_ERROR,
+                    level=logging.ERROR,
+                    post_id=post.id,
+                    error=type(exc).__name__,
+                )
+                continue
+            retried += 1
+        if retried:
+            log_event(logger, EVENT_RECOVERY_DONE, retried=retried)
+        return retried
 
     async def _recover_post(self, post: Post, now: datetime) -> None:
         """Восстанавливает один пост: reschedule или передача в missed handler."""

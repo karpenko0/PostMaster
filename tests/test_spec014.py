@@ -34,6 +34,7 @@ from postmaster.publishers.reminder import (
 )
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
+from postmaster.services.dialog_service import REMINDER_BUTTON
 from postmaster.services.publication_service import PublicationService
 
 SPEC_014_PATH = Path(__file__).resolve().parent.parent / "docs" / "specs" / "SPEC-014.md"
@@ -510,10 +511,15 @@ async def test_e2e_54_normal_reminder_flow_delivers_message_and_photo_and_marks_
     await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
 
     fake_telegram.add_photo_message("reminder-e2e-photo", chat_id=42, user_id=42)
+    # PM-03: после фото бот спрашивает тип публикации.
+    await wait_for_state(running_app, 42, DialogState.WAITING_PUBLICATION_TYPE)
+    fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=42, user_id=42)
     await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
 
+    # PM-05: дата показывает превью; публикация создаётся после подтверждения.
     fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+    await wait_for_state(running_app, 42, DialogState.WAITING_CONFIRMATION)
+    fake_telegram.add_callback_query("pm05:confirm", chat_id=42, user_id=42)
     await wait_for_state(running_app, 42, DialogState.IDLE)
 
     with sqlite3.connect(db_path(tmp_path)) as conn:

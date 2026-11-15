@@ -30,6 +30,7 @@ from postmaster.publishers.base import (
 from postmaster.publishers.telegram import TelegramErrorCode, TelegramPublisher
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
+from postmaster.services.dialog_service import TELEGRAM_BUTTON
 from postmaster.services.publication_service import PublicationService
 from postmaster.services.scheduler_service import SchedulerService
 
@@ -618,10 +619,17 @@ async def test_e2e_59_automatic_channel_publication_from_dialog_to_published(
         await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
 
         fake_telegram.add_photo_message("channel-e2e-photo", chat_id=42, user_id=42)
+        # PM-03: выбор типа; POST_MODE=TELEGRAM подставляет канал из конфигурации.
+        await wait_for_state(app, 42, DialogState.WAITING_PUBLICATION_TYPE)
+        fake_telegram.add_text_message(TELEGRAM_BUTTON, chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_TARGET)
+        fake_telegram.add_text_message(CHANNEL_ID, chat_id=42, user_id=42)
         await wait_for_state(app, 42, DialogState.WAITING_DATETIME)
 
+        # PM-05: превью и подтверждение — единственный путь к созданию публикации.
         fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
-        await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+        await wait_for_state(app, 42, DialogState.WAITING_CONFIRMATION)
+        fake_telegram.add_callback_query("pm05:confirm", chat_id=42, user_id=42)
         await wait_for_state(app, 42, DialogState.IDLE)
 
         with sqlite3.connect(db_path(tmp_path)) as conn:
@@ -633,7 +641,9 @@ async def test_e2e_59_automatic_channel_publication_from_dialog_to_published(
         # Наступает запланированное время публикации.
         await app._scheduler._on_post_due(post_id)
 
-        assert fake_telegram.sent_photos == [
+        # Первое sendPhoto — превью в личном чате (PM-05), второе — публикация в канал.
+        published = [photo for photo in fake_telegram.sent_photos if photo["chat_id"] == CHANNEL_ID]
+        assert published == [
             {
                 "chat_id": CHANNEL_ID,
                 "photo": "channel-e2e-photo",

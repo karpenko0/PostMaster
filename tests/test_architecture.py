@@ -39,7 +39,10 @@ ALLOWED_LAYER_DEPENDENCIES: dict[str, frozenset[str]] = {
     "domain": frozenset(),
     "database": frozenset(),
     "bot": frozenset(),
-    "config": frozenset(),
+    # config проверяет TELEGRAM_TARGET_ALLOWLIST чистой функцией из domain
+    # (postmaster.domain.telegram_target): это единственное осознанное ребро,
+    # у domain нет зависимостей, поэтому цикл невозможен (SPEC-001, SPEC-026).
+    "config": frozenset({"domain"}),
     "publishers": frozenset({"domain", "utils"}),
     "repositories": frozenset({"domain", "database", "utils"}),
     "services": frozenset({"domain", "repositories", "publishers", "utils"}),

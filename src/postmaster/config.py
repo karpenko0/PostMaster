@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     )
     default_post_mode: Literal["REMINDER", "TELEGRAM"] = Field(
         default="REMINDER",
-        validation_alias=AliasChoices("DEFAULT_POST_MODE", "POST_MODE"),
+        validation_alias=AliasChoices("DEFAULT_POST_MODE", "POST_MODE", "post_mode"),
         description="Режим по умолчанию для совместимости с POST_MODE.",
     )
     telegram_target_allowlist: str = ""
@@ -81,6 +81,16 @@ class Settings(BaseSettings):
         min_length=1,
         description="Путь к файлу резервной копии SQLite (BACKUP_PATH).",
     )
+
+    @property
+    def post_mode(self) -> str:
+        """Режим публикации по умолчанию: алиас ``default_post_mode`` (SPEC-026).
+
+        Поле называется ``default_post_mode`` (его читает приложение), но переменная
+        окружения и исторический публичный контракт — ``POST_MODE``. Свойство сохраняет
+        оба имени доступными, чтобы не ломать внешний код и конфигурацию.
+        """
+        return self.default_post_mode
 
     @property
     def secret_values(self) -> tuple[str, ...]:
@@ -159,7 +169,7 @@ def load_settings(env_file: str | Path | None = DEFAULT_ENV_FILE) -> Settings:
     if env_file is not None and Path(env_file).is_file():
         load_dotenv(env_file, override=False)
     try:
-        return Settings()
+        settings = Settings()
     except ValidationError as exc:
         problems = "; ".join(
             f"{'.'.join(str(part) for part in error['loc']).upper() or 'CONFIG'}: "
@@ -167,3 +177,12 @@ def load_settings(env_file: str | Path | None = DEFAULT_ENV_FILE) -> Settings:
             for error in exc.errors(include_input=False)
         )
         raise ConfigError(f"некорректная конфигурация: {problems}") from None
+    # Согласованность режима и канала (SPEC-026 §4): запуск в режиме TELEGRAM без
+    # TELEGRAM_TARGET_ID раньше проходил молча и падал уже во время публикации.
+    # Проверка живёт на уровне загрузки настроек: сам Settings остаётся чистой моделью
+    # и может собираться в тестах и утилитах без канала.
+    if settings.default_post_mode == "TELEGRAM" and not (settings.telegram_target_id or "").strip():
+        raise ConfigError(
+            "некорректная конфигурация: TELEGRAM_TARGET_ID: обязателен при POST_MODE=TELEGRAM"
+        )
+    return settings

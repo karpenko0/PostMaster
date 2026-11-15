@@ -18,6 +18,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -26,9 +27,11 @@ from harness import WAIT_SECONDS, db_path
 from postmaster.app import Application
 from postmaster.config import Settings
 from postmaster.database.engine import create_session_factory
+from postmaster.domain.dialog import DialogState
 from postmaster.domain.post import PostStatus, PublicationType
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
+from postmaster.services.dialog_service import REMINDER_BUTTON, TELEGRAM_BUTTON
 
 USER_TG = 99001
 CHAT_ID = 99001
@@ -119,6 +122,102 @@ async def telegram_app(tmp_path: Path, fake_telegram) -> AsyncIterator[Applicati
         await _stop_app(app, fake_telegram)
 
 
+async def _choose_type_and_confirm(
+    fake_telegram,
+    app: Application,
+    *,
+    type_button: str,
+    date_text: str | None = None,
+    ask_target: bool = True,
+    choose_type: bool = True,
+) -> None:
+    """Проходит шаги PM-03 (тип публикации) и PM-05 (превью → подтверждение).
+
+    Без этих шагов диалог остаётся в WAITING_PUBLICATION_TYPE/WAITING_CONFIRMATION:
+    публикация создаётся только после явного подтверждения. ``choose_type=False``
+    нужен, когда тип уже выбран ранее (например, после ошибки формата даты).
+    """
+    if choose_type:
+        await _wait_for_state(app, DialogState.WAITING_PUBLICATION_TYPE)
+        await _await_reply(
+            fake_telegram,
+            action=lambda: fake_telegram.add_text_message(
+                type_button, chat_id=CHAT_ID, user_id=USER_TG
+            ),
+        )
+    if type_button == TELEGRAM_BUTTON and ask_target:
+        await _wait_for_state(app, DialogState.WAITING_TARGET)
+        await _await_reply(
+            fake_telegram,
+            action=lambda: fake_telegram.add_text_message(
+                "-1001234567890", chat_id=CHAT_ID, user_id=USER_TG
+            ),
+        )
+    if date_text is not None:
+        await _wait_for_state(app, DialogState.WAITING_DATETIME)
+        await _await_reply(
+            fake_telegram,
+            action=lambda: fake_telegram.add_text_message(
+                date_text, chat_id=CHAT_ID, user_id=USER_TG
+            ),
+        )
+    # Ждём превью (фото с подписью) и подтверждаем его inline-кнопкой.
+    await _wait_for_preview(fake_telegram)
+    await _wait_for_state(app, DialogState.WAITING_CONFIRMATION)
+    await _await_reply(
+        fake_telegram,
+        action=lambda: fake_telegram.add_callback_query(
+            "pm05:confirm", chat_id=CHAT_ID, user_id=USER_TG
+        ),
+    )
+
+
+async def _wait_for_state(app: Application, state: DialogState, *, timeout: float = 5.0) -> None:
+    """Ждёт, пока FSM пользователя перейдёт в ожидаемое состояние.
+
+    Между отправкой сообщения и записью состояния в БД проходит время: без этой
+    синхронизации следующий апдейт мог быть обработан ещё в старом состоянии.
+    """
+    elapsed = 0.0
+    while elapsed < timeout:
+        if await _current_state(app) == state:
+            return
+        await asyncio.sleep(0.02)
+        elapsed += 0.02
+    raise AssertionError(f"FSM не перешёл в {state}")
+
+
+async def _current_state(app: Application) -> str | None:
+    return await app._state_storage.get_state(CHAT_ID, CHAT_ID)
+
+
+async def _wait_for_preview(fake_telegram, *, timeout: float = 5.0) -> dict:
+    """Ждёт отправки превью (sendPhoto с подписью) в fake Telegram."""
+    elapsed = 0.0
+    while elapsed < timeout:
+        if fake_telegram.sent_photos:
+            return fake_telegram.sent_photos[-1]
+        await asyncio.sleep(0.05)
+        elapsed += 0.05
+    raise AssertionError(
+        "превью перед сохранением не появилось; "
+        f"messages={[m.get('text') for m in fake_telegram.sent_messages]}; "
+        f"photos={fake_telegram.sent_photos}"
+    )
+
+
+def _moscow_future(hours: int = 2) -> str:
+    """Будущее время в формате приложения (DEFAULT_TIMEZONE=Europe/Moscow).
+
+    Раньше здесь форматировался UTC-момент, и при поясе приложения Europe/Moscow
+    дата оказывалась в прошлом — сценарий падал на валидации.
+    """
+    moscow = ZoneInfo("Europe/Moscow")
+    return (
+        (datetime.now(UTC) + timedelta(hours=hours)).astimezone(moscow).strftime("%d.%m.%Y %H:%M")
+    )
+
+
 def _texts_of(messages: list[dict]) -> list[str]:
     return [m.get("text", "") for m in messages]
 
@@ -135,22 +234,25 @@ async def test_reminder_e2e_happy_path_creates_pending_post(reminder_app, fake_t
     fake_telegram.add_text_message("/start", chat_id=CHAT_ID, user_id=USER_TG)
     await _send_and_await_update(fake_telegram)
     await _wait_for_sent(fake_telegram, marker="PostMaster")
+    await _wait_for_state(app, DialogState.WAITING_PHOTO)
 
-    # Фото — переход в WAITING_DATETIME.
+    # Фото — переход к выбору типа публикации (PM-03).
     fake_telegram.add_photo_message(file_id=PHOTO_ID, chat_id=CHAT_ID, user_id=USER_TG)
     await _send_and_await_update(fake_telegram)
-    await _wait_for_sent(fake_telegram, marker="Фото получил")
+    await _wait_for_sent(fake_telegram, marker="Как опубликовать этот пост?")
 
-    # Будущая дата — пост создаётся и регистрируется в Scheduler.
+    # Будущая дата — превью (PM-05), затем подтверждение создаёт пост в Scheduler.
     # Используем Europe/Moscow (DEFAULT_TIMEZONE), поэтому формируем локальное время.
     import zoneinfo
 
     moscow = zoneinfo.ZoneInfo("Europe/Moscow")
     future_local = datetime(2099, 1, 1, 12, 0, tzinfo=moscow)
-    fake_telegram.add_text_message(
-        future_local.strftime("%d.%m.%Y %H:%M"), chat_id=CHAT_ID, user_id=USER_TG
+    await _choose_type_and_confirm(
+        fake_telegram,
+        app,
+        type_button=REMINDER_BUTTON,
+        date_text=future_local.strftime("%d.%m.%Y %H:%M"),
     )
-    await _send_and_await_update(fake_telegram)
     await _wait_for_sent(fake_telegram, marker="Принято")
 
     # Состояние пользователя и публикации в БД.
@@ -186,15 +288,18 @@ async def test_telegram_e2e_happy_path_saves_post_with_target(telegram_app, fake
 
     fake_telegram.add_text_message("/start", chat_id=CHAT_ID, user_id=USER_TG)
     await _send_and_await_update(fake_telegram)
+    await _wait_for_state(app, DialogState.WAITING_PHOTO)
 
     fake_telegram.add_photo_message(file_id=PHOTO_ID, chat_id=CHAT_ID, user_id=USER_TG)
     await _send_and_await_update(fake_telegram)
 
-    future = datetime.now(UTC) + timedelta(hours=3)
-    fake_telegram.add_text_message(
-        future.strftime("%d.%m.%Y %H:%M"), chat_id=CHAT_ID, user_id=USER_TG
+    # При явном выборе TELEGRAM бот запрашивает канал (POST_MODE влияет на превью).
+    await _choose_type_and_confirm(
+        fake_telegram,
+        app,
+        type_button=TELEGRAM_BUTTON,
+        date_text=_moscow_future(3),
     )
-    await _send_and_await_update(fake_telegram)
     await _wait_for_sent(fake_telegram, marker="Запланировано")
 
     factory = create_session_factory(app._engine)
@@ -219,15 +324,17 @@ async def test_cancel_e2e_marks_post_cancelled_and_removes_scheduler_job(
 
     fake_telegram.add_text_message("/start", chat_id=CHAT_ID, user_id=USER_TG)
     await _send_and_await_update(fake_telegram)
+    await _wait_for_state(app, DialogState.WAITING_PHOTO)
 
     fake_telegram.add_photo_message(file_id=PHOTO_ID, chat_id=CHAT_ID, user_id=USER_TG)
     await _send_and_await_update(fake_telegram)
 
-    future = datetime.now(UTC) + timedelta(hours=2)
-    fake_telegram.add_text_message(
-        future.strftime("%d.%m.%Y %H:%M"), chat_id=CHAT_ID, user_id=USER_TG
+    await _choose_type_and_confirm(
+        fake_telegram,
+        app,
+        type_button=REMINDER_BUTTON,
+        date_text=_moscow_future(2),
     )
-    await _send_and_await_update(fake_telegram)
     await _wait_for_sent(fake_telegram, marker="Принято")
 
     factory = create_session_factory(app._engine)
@@ -235,10 +342,7 @@ async def test_cancel_e2e_marks_post_cancelled_and_removes_scheduler_job(
     assert user is not None
     post = (await PostRepository(factory).list_pending_by_user(user.id))[0]
     assert post.status == PostStatus.PENDING
-    assert any(
-        job.id == f"post:{post.id}"
-        for job in app._scheduler.scheduler.get_jobs()  # type: ignore[attr-defined]
-    )
+    assert any(job.id == f"post:{post.id}" for job in app._scheduler._scheduler.get_jobs())
 
     fake_telegram.add_text_message(f"/cancel {post.id}", chat_id=CHAT_ID, user_id=USER_TG)
     await _send_and_await_update(fake_telegram)
@@ -247,10 +351,7 @@ async def test_cancel_e2e_marks_post_cancelled_and_removes_scheduler_job(
     persisted = await PostRepository(factory).get_by_id(post.id)
     assert persisted is not None
     assert persisted.status == PostStatus.CANCELLED
-    assert not any(
-        job.id == f"post:{post.id}"
-        for job in app._scheduler.scheduler.get_jobs()  # type: ignore[attr-defined]
-    )
+    assert not any(job.id == f"post:{post.id}" for job in app._scheduler._scheduler.get_jobs())
 
 
 async def test_cancel_e2e_nonexistent_post_returns_error(reminder_app, fake_telegram) -> None:
@@ -281,14 +382,27 @@ async def test_invalid_datetime_e2e_preserves_draft_and_returns_error(
 
     fake_telegram.add_text_message("/start", chat_id=CHAT_ID, user_id=USER_TG)
     await _send_and_await_update(fake_telegram)
+    await _wait_for_state(app, DialogState.WAITING_PHOTO)
 
     fake_telegram.add_photo_message(file_id=PHOTO_ID, chat_id=CHAT_ID, user_id=USER_TG)
     await _send_and_await_update(fake_telegram)
-    await _wait_for_sent(fake_telegram, marker="Фото получил")
+    # PM-03: сначала тип публикации (ждём состояние до отправки следующего шага).
+    await _wait_for_state(app, DialogState.WAITING_PUBLICATION_TYPE)
+    await _await_reply(
+        fake_telegram,
+        action=lambda: fake_telegram.add_text_message(
+            REMINDER_BUTTON, chat_id=CHAT_ID, user_id=USER_TG
+        ),
+    )
+    await _wait_for_state(app, DialogState.WAITING_DATETIME)
 
-    # Полностью невалидный формат.
-    fake_telegram.add_text_message("вчера в обед", chat_id=CHAT_ID, user_id=USER_TG)
-    await _send_and_await_update(fake_telegram)
+    # Полностью невалидный формат: бот отвечает ошибкой, черновик сохраняется.
+    await _await_reply(
+        fake_telegram,
+        action=lambda: fake_telegram.add_text_message(
+            "вчера в обед", chat_id=CHAT_ID, user_id=USER_TG
+        ),
+    )
     await _wait_for_sent(fake_telegram, marker="не понимаю такой формат")
 
     # Пост НЕ создан.
@@ -298,12 +412,15 @@ async def test_invalid_datetime_e2e_preserves_draft_and_returns_error(
     posts = await PostRepository(factory).list_pending_by_user(user.id)
     assert posts == []
 
-    # Пользователь снова может прислать корректную дату.
-    future = datetime.now(UTC) + timedelta(hours=2)
-    fake_telegram.add_text_message(
-        future.strftime("%d.%m.%Y %H:%M"), chat_id=CHAT_ID, user_id=USER_TG
+    # Пользователь снова может прислать корректную дату: превью → подтверждение.
+    # Тип уже выбран на предыдущем шаге, повторять его не нужно.
+    await _choose_type_and_confirm(
+        fake_telegram,
+        app,
+        type_button=REMINDER_BUTTON,
+        date_text=_moscow_future(2),
+        choose_type=False,
     )
-    await _send_and_await_update(fake_telegram)
     await _wait_for_sent(fake_telegram, marker="Принято")
 
     posts_after = await PostRepository(factory).list_pending_by_user(user.id)
@@ -314,16 +431,35 @@ async def test_past_datetime_e2e_rejected_and_post_not_created(reminder_app, fak
     """Прошедшая дата: rejection, пост не создан (SPEC-005)."""
     app = reminder_app
 
-    fake_telegram.add_text_message("/start", chat_id=CHAT_ID, user_id=USER_TG)
-    await _send_and_await_update(fake_telegram)
-    fake_telegram.add_photo_message(file_id=PHOTO_ID, chat_id=CHAT_ID, user_id=USER_TG)
-    await _send_and_await_update(fake_telegram)
-
-    past = datetime.now(UTC) - timedelta(days=1)
-    fake_telegram.add_text_message(
-        past.strftime("%d.%m.%Y %H:%M"), chat_id=CHAT_ID, user_id=USER_TG
+    await _await_reply(
+        fake_telegram,
+        action=lambda: fake_telegram.add_text_message("/start", chat_id=CHAT_ID, user_id=USER_TG),
     )
-    await _send_and_await_update(fake_telegram)
+    await _wait_for_state(app, DialogState.WAITING_PHOTO)
+    await _await_reply(
+        fake_telegram,
+        action=lambda: fake_telegram.add_photo_message(
+            file_id=PHOTO_ID, chat_id=CHAT_ID, user_id=USER_TG
+        ),
+    )
+    # PM-03: тип публикации обязателен перед шагом даты.
+    await _wait_for_state(app, DialogState.WAITING_PUBLICATION_TYPE)
+    await _await_reply(
+        fake_telegram,
+        action=lambda: fake_telegram.add_text_message(
+            REMINDER_BUTTON, chat_id=CHAT_ID, user_id=USER_TG
+        ),
+    )
+    await _wait_for_state(app, DialogState.WAITING_DATETIME)
+
+    moscow = ZoneInfo("Europe/Moscow")
+    past = (datetime.now(UTC) - timedelta(days=1)).astimezone(moscow)
+    await _await_reply(
+        fake_telegram,
+        action=lambda: fake_telegram.add_text_message(
+            past.strftime("%d.%m.%Y %H:%M"), chat_id=CHAT_ID, user_id=USER_TG
+        ),
+    )
     await _wait_for_sent(fake_telegram, marker="уже прошло")
 
     factory = create_session_factory(app._engine)
@@ -349,11 +485,12 @@ async def test_my_posts_e2e_empty_then_shows_post(reminder_app, fake_telegram) -
     fake_telegram.add_photo_message(file_id=PHOTO_ID, chat_id=CHAT_ID, user_id=USER_TG)
     await _send_and_await_update(fake_telegram)
 
-    future = datetime.now(UTC) + timedelta(hours=2)
-    fake_telegram.add_text_message(
-        future.strftime("%d.%m.%Y %H:%M"), chat_id=CHAT_ID, user_id=USER_TG
+    await _choose_type_and_confirm(
+        fake_telegram,
+        app,
+        type_button=REMINDER_BUTTON,
+        date_text=_moscow_future(2),
     )
-    await _send_and_await_update(fake_telegram)
     await _wait_for_sent(fake_telegram, marker="Принято")
 
     factory = create_session_factory(app._engine)
@@ -364,3 +501,34 @@ async def test_my_posts_e2e_empty_then_shows_post(reminder_app, fake_telegram) -
     fake_telegram.add_text_message("/my_posts", chat_id=CHAT_ID, user_id=USER_TG)
     await _send_and_await_update(fake_telegram)
     await _wait_for_sent(fake_telegram, marker=f"ID {expected_post.id}")
+
+
+async def _await_reply(
+    fake_telegram, *, action, timeout: float = 5.0, tag: str = "message"
+) -> None:
+    """Отправляет действие и ждёт ПОЛНОЙ обработки: появления нового исходящего события.
+
+    ``update_delivered`` поднимается при доставке апдейта, то есть до выполнения
+    хэндлера. Если синхронизироваться по нему, следующий шаг уходит раньше, чем бот
+    записал состояние и ответил — и обрабатывается в старом состоянии. Поэтому
+    отправляем и ждём именно ответ.
+    """
+    before = len(fake_telegram.outbound_events)
+    action()
+    await _await_outbound(fake_telegram, before=before, timeout=timeout)
+
+
+async def _await_outbound(fake_telegram, *, before: int, timeout: float = 5.0) -> None:
+    """Ждёт, пока бот пришлёт новое исходящее сообщение (текст или фото).
+
+    ``update_delivered`` поднимается при доставке update, то есть ДО обработки
+    хэндлером: следующий шаг мог уйти раньше, чем бот ответит на предыдущий.
+    Поэтому синхронизируемся по числу исходящих событий.
+    """
+    elapsed = 0.0
+    while elapsed < timeout:
+        if len(fake_telegram.outbound_events) > before:
+            return
+        await asyncio.sleep(0.02)
+        elapsed += 0.02
+    raise AssertionError("бот не прислал ответ на сообщение")

@@ -117,3 +117,16 @@ class PublisherResolver:
 
         logger.info("Publisher resolved post_id=%s type=%s", post_id, key)
         return publisher
+
+
+class DefaultPublisherResolver(PublisherResolver):
+    """Резолвер по умолчанию: сопоставление PublicationType → Publisher (SPEC-016 §10–12).
+
+    Историческое имя публичного контракта, на которое опираются тесты SPEC-010/016/020/
+    021/022/025/032 и ``test_unit_qualities`` (категория ``resolver``). Класс ничего не
+    добавляет к логике ``PublisherResolver`` и существует как явная точка расширения:
+    приложение (``app.py``) собирает резолвер именно под этим именем, поэтому смысл
+    «какой резолвер используется по умолчанию» виден в коде сборки.
+    """
+
+    __slots__ = ()

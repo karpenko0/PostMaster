@@ -33,6 +33,7 @@ from postmaster.publishers import (
 )
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
+from postmaster.services.dialog_service import REMINDER_BUTTON, TELEGRAM_BUTTON
 from postmaster.services.publication_service import PublicationService
 from postmaster.services.scheduler_service import SchedulerService
 
@@ -418,10 +419,19 @@ async def test_e2e_27_scheduler_to_resolver_to_publisher_for_reminder_and_telegr
         await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
 
         fake_telegram.add_photo_message(f"photo-{post_mode}", chat_id=42, user_id=42)
+        # PM-03: тип публикации выбирается явно (для TELEGRAM — ещё и канал).
+        await wait_for_state(app, 42, DialogState.WAITING_PUBLICATION_TYPE)
+        button = REMINDER_BUTTON if post_mode == "REMINDER" else TELEGRAM_BUTTON
+        fake_telegram.add_text_message(button, chat_id=42, user_id=42)
+        if post_mode == "TELEGRAM":
+            await wait_for_state(app, 42, DialogState.WAITING_TARGET)
+            fake_telegram.add_text_message(CHANNEL_ID, chat_id=42, user_id=42)
         await wait_for_state(app, 42, DialogState.WAITING_DATETIME)
 
+        # PM-05: публикация создаётся только после подтверждения превью.
         fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
-        await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+        await wait_for_state(app, 42, DialogState.WAITING_CONFIRMATION)
+        fake_telegram.add_callback_query("pm05:confirm", chat_id=42, user_id=42)
         await wait_for_state(app, 42, DialogState.IDLE)
 
         with sqlite3.connect(db_path(tmp_path)) as conn:
@@ -455,3 +465,27 @@ async def test_e2e_27_scheduler_to_resolver_to_publisher_for_reminder_and_telegr
     finally:
         await app.stop()
         await asyncio.wait_for(task, timeout=5.0)
+
+
+def test_default_publisher_resolver_is_public_default_contract() -> None:
+    """`DefaultPublisherResolver` — публичный резолвер по умолчанию (SPEC-016 §10–12).
+
+    Приложение (`app.py`) собирает резолвер под этим именем, его же ожидает
+    `tests/test_unit_qualities.py` (категория «resolver»). Класс обязан быть
+    наследником `PublisherResolver` и полностью повторять его контракт.
+    """
+    from postmaster.publishers import DefaultPublisherResolver
+
+    assert issubclass(DefaultPublisherResolver, PublisherResolver)
+
+    reminder_pub = ReminderPublisher(RecordingTelegramClient(), StubUserRepository(None))
+    telegram_pub = TelegramPublisher(RecordingTelegramClient())
+    resolver = DefaultPublisherResolver(
+        reminder_publisher=reminder_pub,
+        telegram_publisher=telegram_pub,
+    )
+
+    assert resolver.resolve(PublicationType.REMINDER) is reminder_pub
+    assert resolver.resolve(PublicationType.TELEGRAM) is telegram_pub
+    with pytest.raises(PublisherNotFoundError):
+        DefaultPublisherResolver().resolve(PublicationType.TELEGRAM)

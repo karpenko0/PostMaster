@@ -47,11 +47,18 @@ class SchedulerService:
         self,
         post_repository: PostRepository | None = None,
         publication_service: PostExecutionService | None = None,
+        *,
+        publication_executor: PostExecutionService | None = None,
     ) -> None:
         # Все времена в БД хранятся в UTC (SPEC-006), поэтому Scheduler работает в UTC.
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         self._posts = post_repository
-        self._publication_service = publication_service
+        # ``publication_executor`` — историческое имя того же контракта (execute(post_id)),
+        # которым пользуются тесты SPEC-010/011/018 и внешние интеграции. Оба имени
+        # взаимозаменяемы, публичный интерфейс не ломается.
+        self._publication_service = (
+            publication_service if publication_service is not None else publication_executor
+        )
         # Допуск на задержку срабатывания. Актуальность задания определяется сравнением
         # его версии (ожидаемого времени) с БД, поэтому опоздание безопасно: при
         # расхождении задание перерегистрируется, а не публикует пост (PM-06 / BUG-04).

@@ -61,6 +61,17 @@ RETRYABLE_CODES: frozenset[TelegramErrorCode] = frozenset(
     }
 )
 
+#: Собственные исключения Publisher'ов, которые уже означают нормализованный код.
+#: Классификация по типу идёт ДО анализа текста: ``TelegramTimeoutError("500")``
+#: остаётся TIMEOUT, а не превращается в UNAVAILABLE из-за цифры в сообщении.
+_STRUCTURAL_CODES = {
+    "TelegramTimeoutError": TelegramErrorCode.TIMEOUT.value,
+    "TelegramPermissionError": TelegramErrorCode.PERMISSION.value,
+    "TelegramBlockedError": TelegramErrorCode.BLOCKED.value,
+    "TargetMissingError": TelegramErrorCode.PERMISSION.value,
+    "FileIdMissingError": TelegramErrorCode.INVALID_FILE.value,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class TelegramError:
@@ -204,6 +215,10 @@ class TelegramErrorMapper:
         """Определяет код ошибки по типу, коду ответа и тексту исключения."""
         text = str(exc).lower()
         status = _status_code(exc)
+
+        structural = _STRUCTURAL_CODES.get(type(exc).__name__)
+        if structural is not None:
+            return TelegramErrorCode(structural)
 
         if _is_timeout(exc, text):
             return TelegramErrorCode.TIMEOUT
