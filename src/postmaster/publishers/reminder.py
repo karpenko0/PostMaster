@@ -7,6 +7,7 @@
 
 import inspect
 import logging
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -16,6 +17,7 @@ from telebot.asyncio_helper import ApiTelegramException
 from postmaster.domain.post import PublicationType, TemporaryPublicationError
 from postmaster.domain.user import User
 from postmaster.publishers.base import BotTelegramClient, Publisher, PublishResult
+from postmaster.utils.logging_config import redact
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +76,9 @@ def _safe_error_message(
     exc: BaseException,
     file_id: str | None,
     caption: str | None,
+    secrets: tuple[str, ...] = (),
 ) -> str:
-    raw = str(exc).strip() or type(exc).__name__
+    raw = redact(str(exc).strip() or type(exc).__name__, secrets)
     if file_id and len(file_id) >= 4:
         raw = raw.replace(file_id, "<file_id>")
     if caption:
@@ -90,6 +93,8 @@ class ReminderPublisher(Publisher):
         self,
         telegram_client: Any,
         user_repository: UserLookup | Any,
+        *,
+        secrets: Iterable[str] = (),
     ) -> None:
         # Поддерживаем оба порядка позиционных аргументов: (client, repo) и (repo, client).
         if hasattr(telegram_client, "get_by_id") and not hasattr(telegram_client, "send_message"):
@@ -100,6 +105,7 @@ class ReminderPublisher(Publisher):
             else telegram_client
         )
         self._users = user_repository
+        self._secrets = tuple(secrets)
 
     async def publish(self, post: Any) -> PublishResult:
         """Выполняет отправку напоминания и фото, возвращая PublishResult (SPEC-014 §13–15)."""
@@ -145,7 +151,7 @@ class ReminderPublisher(Publisher):
             return self._fail(
                 post_id,
                 ReminderErrorCode.MESSAGE_SEND_FAILED,
-                _safe_error_message(exc, file_id, caption),
+                _safe_error_message(exc, file_id, caption, self._secrets),
                 retryable=_is_temporary_telegram_error(exc),
             )
 
@@ -168,7 +174,7 @@ class ReminderPublisher(Publisher):
             return self._fail(
                 post_id,
                 code,
-                _safe_error_message(exc, file_id, caption),
+                _safe_error_message(exc, file_id, caption, self._secrets),
                 retryable=retryable,
             )
 

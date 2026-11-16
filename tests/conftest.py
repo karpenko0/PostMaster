@@ -17,6 +17,7 @@ from postmaster.config import Settings
 # Переменные настроек. Тесты очищают их, потому что load_dotenv() пишет в os.environ.
 SETTINGS_ENV_NAMES = (
     "BOT_TOKEN",
+    "BOT_PROXY_URL",
     "DATABASE_URL",
     "LOG_LEVEL",
     "DEFAULT_TIMEZONE",
