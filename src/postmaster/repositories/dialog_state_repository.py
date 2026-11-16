@@ -85,6 +85,14 @@ class DialogStateRepository:
         """Записывает черновик, сохраняя состояние одной транзакцией."""
         await self._upsert(user_id, chat_id, state=None, draft=draft)
 
+    async def save(self, user_id: int, chat_id: int, *, state: str, draft: dict[str, str]) -> None:
+        """Атомарно пишет состояние и черновик (порт DialogStore.save).
+
+        Один UPDATE/INSERT в одной транзакции: промежуточного состояния «новый шаг
+        со старым черновиком» не существует ни для одного читателя.
+        """
+        await self._upsert(user_id, chat_id, state=str(state), draft=draft)
+
     async def clear(self, user_id: int, chat_id: int) -> None:
         """Полностью удаляет строку: сценарий завершён, хранить нечего."""
         async with self._session_factory() as session, session.begin():

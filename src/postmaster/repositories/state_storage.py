@@ -164,6 +164,12 @@ class SqlAlchemyStateStorage(StateStorageBase):
         message_thread_id: int | None = None,
         bot_id: int | None = None,
     ) -> bool:
+        """Заменяет черновик целиком, не трогая состояние.
+
+        Так порт ``DialogStore.save`` пишет пару «состояние + черновик»: состояние
+        выставляется первым ``set_state``, затем одним вызовом сюда приходит черновик.
+        Обе записи — короткие транзакции по одной строке.
+        """
         async with self._lock:
             async with self._session_factory() as session, session.begin():
                 model = await session.get(DialogStateModel, (int(user_id), int(chat_id)))
@@ -171,6 +177,25 @@ class SqlAlchemyStateStorage(StateStorageBase):
                     return False
                 model.draft = self._encode(data)
                 model.updated_at = utc_now().replace(tzinfo=None)
+            return True
+
+    async def save_with_state(
+        self,
+        chat_id: int,
+        user_id: int,
+        *,
+        state: str,
+        draft: dict,
+    ) -> bool:
+        """Атомарно пишет состояние и черновик одной транзакцией (порт DialogStore.save).
+
+        Отличие от telebot-контракта ``save(data)``: здесь пара «шаг + данные»
+        коммитится целиком, поэтому ни один читатель не увидит новый шаг со старым
+        черновиком — источник гонок в E2E (потеря отправленного фото, подтверждение
+        предыдущего черновика).
+        """
+        async with self._lock:
+            await self._upsert(int(user_id), int(chat_id), state=str(state), draft=draft)
             return True
 
     def get_interactive_data(

@@ -171,6 +171,9 @@ class Application:
                 scheduler,
                 telegram_target_allowlist=settings.telegram_target_allowlist,
             ),
+            # Тот же allowlist, что и в PostService: запрещённый канал отклоняется
+            # сразу на шаге ввода, а не после ввода даты и подтверждения (SPEC-026).
+            telegram_target_allowlist=settings.telegram_target_allowlist,
             reschedule_service=reschedule_service,
         )
         my_posts_service = MyPostsService(

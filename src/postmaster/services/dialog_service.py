@@ -111,6 +111,18 @@ class DialogStore(Protocol):
 
     async def set_draft(self, user_id: int, chat_id: int, draft: dict[str, str]) -> None: ...
 
+    async def save(
+        self, user_id: int, chat_id: int, *, state: str, draft: dict[str, str]
+    ) -> None:
+        """Атомарно записывает состояние и черновик одной операцией.
+
+        PM-06 / BUG-07: раздельные ``set_state`` и ``set_draft`` дают окно, в котором
+        хранилище содержит новое состояние со старым черновиком. Пользователь в этот
+        момент видит следующий шаг, а обработчик читает данные предыдущего: под
+        нагрузкой это давало потерю только что отправленного фото и подтверждение
+        чужого (старого) черновика. Сервис всегда пишет пару целиком через ``save``.
+        """
+
 
 class DialogOutcomeKind(StrEnum):
     """Что произошло с сообщением. По этому значению handlers выбирает текст ответа."""
@@ -210,8 +222,7 @@ class DialogService:
                 raise InvalidTransitionError(f"/start недопустим в состоянии {current}")
             draft = {DRAFT_ID_KEY: str(uuid.uuid4())}
             # Одна запись вместо двух: состояние и черновик не расходятся (PM-06 / BUG-07).
-            await self._store.set_state(user_id, chat_id, target)
-            await self._store.set_draft(user_id, chat_id, draft)
+            await self._store.save(user_id, chat_id, state=target, draft=draft)
         return DialogOutcome(DialogOutcomeKind.STARTED, target, draft_id=draft[DRAFT_ID_KEY])
 
     async def receive_photo(self, user_id: int, chat_id: int, photo: PhotoData) -> DialogOutcome:
@@ -244,8 +255,7 @@ class DialogService:
             # не могут подтвердить или отменить этот черновик.
             replacement_id = str(uuid.uuid4())
             draft[DRAFT_ID_KEY] = replacement_id
-            await self._store.set_state(user_id, chat_id, target)
-            await self._store.set_draft(user_id, chat_id, draft)
+            await self._store.save(user_id, chat_id, state=target, draft=draft)
         if current in (
             DialogState.WAITING_PUBLICATION_TYPE,
             DialogState.WAITING_TARGET,
@@ -273,8 +283,7 @@ class DialogService:
                 draft.pop(TARGET_ID_KEY, None)
                 target = next_state(current, event)
                 assert target is not None
-                await self._store.set_draft(user_id, chat_id, draft)
-                await self._store.set_state(user_id, chat_id, target)
+                await self._store.save(user_id, chat_id, state=target, draft=draft)
                 kind = (
                     DialogOutcomeKind.TYPE_SELECTED
                     if event == DialogEvent.REMINDER
@@ -292,8 +301,7 @@ class DialogService:
                 draft[TARGET_ID_KEY] = channel
                 target = next_state(current, DialogEvent.VALID_TARGET)
                 assert target is not None
-                await self._store.set_draft(user_id, chat_id, draft)
-                await self._store.set_state(user_id, chat_id, target)
+                await self._store.save(user_id, chat_id, state=target, draft=draft)
                 return DialogOutcome(DialogOutcomeKind.TYPE_SELECTED, target)
             if current == DialogState.WAITING_RESCHEDULE_DATETIME:
                 # PM-04: перенос публикации на новое время.
@@ -328,8 +336,7 @@ class DialogService:
                 draft[DRAFT_ID_KEY] = draft_id
                 draft.pop(CONFIRMED_POST_ID_KEY, None)
                 draft[DRAFT_STAGE_KEY] = DRAFT_STAGE_PREVIEW
-                await self._store.set_draft(user_id, chat_id, draft)
-                await self._store.set_state(user_id, chat_id, target)
+                await self._store.save(user_id, chat_id, state=target, draft=draft)
                 return DialogOutcome(
                     DialogOutcomeKind.PREVIEW_SHOWN,
                     target,
@@ -564,8 +571,7 @@ class DialogService:
         draft[DRAFT_STAGE_KEY] = DRAFT_STAGE_CONFIRMED
         if draft_id is not None:
             draft[DRAFT_ID_KEY] = draft_id
-        await self._store.set_draft(user_id, chat_id, draft)
-        await self._store.set_state(user_id, chat_id, DialogState.IDLE)
+        await self._store.save(user_id, chat_id, state=DialogState.IDLE, draft=draft)
 
     async def resolve_confirmed_post(
         self,
@@ -628,8 +634,7 @@ class DialogService:
                 return DialogOutcome(
                     DialogOutcomeKind.INVALID_MESSAGE, current, draft_id=current_draft_id
                 )
-            await self._store.set_draft(user_id, chat_id, {})
-            await self._store.set_state(user_id, chat_id, DialogState.IDLE)
+            await self._store.save(user_id, chat_id, state=DialogState.IDLE, draft={})
         logger.info("Post creation cancelled by user user_id=%s", user_id)
         return DialogOutcome(
             DialogOutcomeKind.CONFIRMATION_CANCELLED,
@@ -694,8 +699,9 @@ class DialogService:
                 previous = await self._store.get_draft(user_id, chat_id)
                 if previous.get(DRAFT_ID_KEY):
                     draft[DRAFT_ID_KEY] = previous[DRAFT_ID_KEY]
-            await self._store.set_state(user_id, chat_id, DialogState.WAITING_RESCHEDULE_DATETIME)
-            await self._store.set_draft(user_id, chat_id, draft)
+            await self._store.save(
+                user_id, chat_id, state=DialogState.WAITING_RESCHEDULE_DATETIME, draft=draft
+            )
         return DialogOutcome(
             DialogOutcomeKind.RESCHEDULE_PROMPT,
             DialogState.WAITING_RESCHEDULE_DATETIME,
@@ -718,8 +724,7 @@ class DialogService:
                 user_id,
                 draft,
             )
-            await self._store.set_state(user_id, chat_id, DialogState.IDLE)
-            await self._store.set_draft(user_id, chat_id, {})
+            await self._store.save(user_id, chat_id, state=DialogState.IDLE, draft={})
             return DialogOutcome(DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE)
         post_id = int(raw_post_id)
         zone_name = await self._users.timezone_of(user_id)
@@ -740,8 +745,7 @@ class DialogService:
 
         user = await self._users.get_by_telegram_id(user_id)
         if user is None or self._reschedule is None:
-            await self._store.set_state(user_id, chat_id, DialogState.IDLE)
-            await self._store.set_draft(user_id, chat_id, {})
+            await self._store.save(user_id, chat_id, state=DialogState.IDLE, draft={})
             return DialogOutcome(DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE)
         try:
             result = await self._reschedule.reschedule_with_status(
@@ -757,13 +761,11 @@ class DialogService:
                 user_id,
                 post_id,
             )
-            await self._store.set_state(user_id, chat_id, DialogState.IDLE)
-            await self._store.set_draft(user_id, chat_id, {})
+            await self._store.save(user_id, chat_id, state=DialogState.IDLE, draft={})
             return DialogOutcome(DialogOutcomeKind.RESCHEDULE_REJECTED, DialogState.IDLE)
 
         target = DialogState.IDLE
-        await self._store.set_state(user_id, chat_id, target)
-        await self._store.set_draft(user_id, chat_id, {})
+        await self._store.save(user_id, chat_id, state=target, draft={})
         logger.info(
             "Reschedule applied user_id=%s post_id=%s scheduled_at_utc=%s",
             user_id,

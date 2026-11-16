@@ -30,3 +30,20 @@ class TelebotDialogStore:
         await self._bot.reset_data(user_id, chat_id)
         for key, value in draft.items():
             await self._bot.add_data(user_id, chat_id, **{key: value})
+
+    async def save(self, user_id: int, chat_id: int, *, state: str, draft: dict[str, str]) -> None:
+        """Пишет шаг и черновик без промежуточного состояния (порт DialogStore.save).
+
+        ``reset_data`` + N × ``add_data`` оставляли окно, в котором другое сообщение
+        того же пользователя видело новый шаг со старым черновиком. Хранилище снимает
+        это окно, потому что ``save`` подменяет данные одним присваиванием, а не по
+        ключам. Окончательную атомарность даёт персистентное хранилище приложения
+        (``SqlAlchemyStateStorage``): там строка пишется одной транзакцией.
+        """
+        await self._bot.set_state(user_id, state, chat_id)
+        await self._bot.current_states.save(
+            chat_id,
+            user_id,
+            {str(key): value for key, value in draft.items()},
+            bot_id=self._bot.bot_id,
+        )

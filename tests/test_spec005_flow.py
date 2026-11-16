@@ -37,6 +37,12 @@ class Store:
     async def set_draft(self, user_id: int, chat_id: int, draft: dict[str, str]) -> None:
         self.draft = dict(draft)
 
+    async def save(
+        self, user_id: int, chat_id: int, *, state: str, draft: dict[str, str]
+    ) -> None:
+        self.state = state
+        self.draft = dict(draft)
+
 
 class Users:
     async def timezone_of(self, user_id: int) -> str:

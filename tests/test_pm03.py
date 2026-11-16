@@ -1,5 +1,6 @@
 """Per-post publication selection and validation."""
 
+import asyncio
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -8,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from fake_telegram import TEST_TOKEN, FakeTelegram
-from harness import db_path, future_date_text, wait_for_state, wait_until
+from harness import WAIT_SECONDS, db_path, future_date_text, wait_for_state, wait_until
 from postmaster.app import Application
 from postmaster.config import Settings
 from postmaster.domain.dialog import DialogState
@@ -145,3 +146,46 @@ def test_config_compatibility(monkeypatch):
     assert Settings(bot_token="12345:" + "a" * 20).default_post_mode == "TELEGRAM"
     monkeypatch.setenv("DEFAULT_POST_MODE", "REMINDER")
     assert Settings(bot_token="12345:" + "a" * 20).default_post_mode == "REMINDER"
+
+
+async def test_dialog_rejects_channel_outside_allowlist_before_datetime(
+    tmp_path: Path, fake_telegram: FakeTelegram
+):
+    """SPEC-026: канал вне allowlist отклоняется на шаге ввода, а не после даты.
+
+    Регрессия: allowlist жил только в PostService, поэтому диалог принимал любой
+    канал и переводил пользователя к вводу даты. Ошибка всплывала лишь на
+    подтверждении — после лишних шагов и без возможности исправить канал.
+    """
+    settings = Settings(
+        bot_token=TEST_TOKEN,
+        database_url=f"sqlite+aiosqlite:///{db_path(tmp_path)}",
+        telegram_target_allowlist="@allowed_channel",
+        default_timezone="UTC",
+    )
+    app = Application.from_settings(settings)
+    run_task = asyncio.create_task(app.run())
+    await asyncio.wait_for(fake_telegram.get_updates_called.wait(), timeout=WAIT_SECONDS)
+    try:
+        fake_telegram.add_text_message("/start", chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_PHOTO)
+        fake_telegram.add_photo_message("allowlist-photo", chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_PUBLICATION_TYPE)
+        fake_telegram.add_text_message(TELEGRAM_BUTTON, chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_TARGET)
+
+        before = len(fake_telegram.sent_messages)
+        fake_telegram.add_text_message("@forbidden_channel", chat_id=42, user_id=42)
+        await wait_until(lambda: len(fake_telegram.sent_messages) > before)
+
+        assert fake_telegram.sent_messages[-1]["text"] == (
+            "Этот канал не входит в список разрешённых. Укажите другой канал."
+        )
+        # Состояние остаётся прежним: дата ещё не принимается.
+        assert await app.bot.get_state(42, 42) == DialogState.WAITING_TARGET
+
+        fake_telegram.add_text_message("@allowed_channel", chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_DATETIME)
+    finally:
+        await app.stop()
+        await asyncio.wait_for(run_task, timeout=WAIT_SECONDS)

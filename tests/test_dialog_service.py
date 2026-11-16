@@ -99,6 +99,13 @@ class InMemoryDialogStore:
             raise RuntimeError("данные нельзя записать без состояния")
         self.drafts[user_id, chat_id] = dict(draft)
 
+    async def save(
+        self, user_id: int, chat_id: int, *, state: str, draft: dict[str, str]
+    ) -> None:
+        # Пара «шаг + черновик» пишется одной операцией: промежуточного состояния нет.
+        self.states[user_id, chat_id] = state
+        self.drafts[user_id, chat_id] = dict(draft)
+
 
 class YieldingDialogStore(InMemoryDialogStore):
     """Уступает управление event loop перед чтением и перед записью состояния.
