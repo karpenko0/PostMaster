@@ -158,6 +158,15 @@ class TelegramChannelPublisher(Publisher):
             error_code=error.code.value,
             retryable=error.retryable,
         )
+        # Уже нормализованные/типизированные ошибки (SPEC-022 retry по типу
+        # исключения) не переклассифицируются: ADR-021 требует сохранять тип,
+        # иначе таймаут с текстом без слова «timeout» стал бы UNKNOWN.
+        if isinstance(exc, TelegramAPIError):
+            raise exc
+        if isinstance(exc, TelegramTimeoutError):
+            raise TelegramTimeoutError(error.message) from exc
+        if isinstance(exc, TelegramPermissionError):
+            raise TelegramPermissionError(error.message) from exc
         if error.code == TelegramErrorCode.PERMISSION:
             raise TelegramPermissionError(error.message) from exc
         if error.code == TelegramErrorCode.TIMEOUT:

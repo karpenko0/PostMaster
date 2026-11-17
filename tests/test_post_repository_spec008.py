@@ -83,6 +83,9 @@ async def test_schema_has_all_fields_constraints_fk_and_indexes(db) -> None:
         "updated_at",
         "published_at",
         "caption",
+        # PM06-R2-002/003: постоянный idempotency key черновика и версия расписания.
+        "source_draft_id",
+        "schedule_version",
     }
     for name, expected_type in {
         "id": "INTEGER",
@@ -99,11 +102,25 @@ async def test_schema_has_all_fields_constraints_fk_and_indexes(db) -> None:
         "updated_at": "DATETIME",
         "published_at": "DATETIME",
         "caption": "TEXT",
+        "source_draft_id": "VARCHAR(64)",
+        "schedule_version": "INTEGER",
     }.items():
         assert fields[name][2].upper() == expected_type
+        # nullable: старые поля + новые PM06-R2-поля (в legacy-БД их нет).
         assert fields[name][3] == (
-            0 if name in {"target_id", "error_message", "published_at", "caption"} else 1
+            0
+            if name
+            in {
+                "target_id",
+                "error_message",
+                "published_at",
+                "caption",
+                "source_draft_id",
+            }
+            else 1
         )
+    # PM06-R2-003: версия расписания всегда заполнена (default 0).
+    assert fields["schedule_version"][3] == 1
     assert fields["id"][5] == 1
     assert fields["status"][4] == "'PENDING'"
     assert foreign_keys_on == 1
@@ -111,6 +128,8 @@ async def test_schema_has_all_fields_constraints_fk_and_indexes(db) -> None:
     assert {index[1] for index in indexes} >= {
         "ix_posts_user_status_scheduled",
         "ix_posts_status_scheduled",
+        # PM06-R2-002: глобальная уникальность ключа черновика.
+        "uq_posts_source_draft_id",
     }
 
 

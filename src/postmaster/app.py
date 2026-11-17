@@ -35,6 +35,7 @@ from postmaster.publishers.base import BotTelegramClient
 from postmaster.publishers.reminder import ReminderPublisher
 from postmaster.publishers.resolver import PublisherResolver
 from postmaster.publishers.telegram import TelegramPublisher
+from postmaster.repositories.dialog_store import DatabaseDialogStore
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.cancel_service import CancelService
@@ -75,6 +76,73 @@ class StartupError(RuntimeError):
     """Приложение не может запуститься. Текст ошибки не содержит секретов."""
 
 
+class HybridDialogStore:
+    """PM06-R2-007: БД — источник истины, telebot StateMemoryStorage — зеркало.
+
+    Зеркало нужно для совместимости с существующими E2E-тестами/диагностикой,
+    которые читают ``bot.get_state``. Все записи идут одной транзакцией в БД;
+    после рестарта :meth:`restore` восстанавливает зеркало из БД.
+    """
+
+    def __init__(self, memory: TelebotDialogStore, persistent: DatabaseDialogStore) -> None:
+        self._memory = memory
+        self._persistent = persistent
+
+    async def get_state(self, user_id: int, chat_id: int) -> str | None:
+        return await self._persistent.get_state(user_id, chat_id)
+
+    async def get_draft(self, user_id: int, chat_id: int) -> dict[str, str]:
+        draft = await self._persistent.get_draft(user_id, chat_id)
+        await self._mirror(user_id, chat_id, await self.get_state(user_id, chat_id), draft)
+        return draft
+
+    async def set_state(self, user_id: int, chat_id: int, state: str) -> None:
+        await self.save(user_id, chat_id, state, await self.get_draft(user_id, chat_id))
+
+    async def set_draft(self, user_id: int, chat_id: int, draft: dict[str, str]) -> None:
+        state = await self.get_state(user_id, chat_id)
+        await self.save(user_id, chat_id, state or "IDLE", draft)
+
+    async def save(self, user_id: int, chat_id: int, state: str, draft: dict[str, str]) -> None:
+        await self._persistent.save(user_id, chat_id, state, draft)
+        await self._mirror(user_id, chat_id, state, draft)
+
+    async def _mirror(
+        self, user_id: int, chat_id: int, state: str | None, draft: dict[str, str]
+    ) -> None:
+        if state is None:
+            return
+        try:
+            await self._memory.set_state(user_id, chat_id, state)
+            await self._memory.set_draft(user_id, chat_id, draft)
+        except Exception:
+            logger.debug("Dialog state mirror failed user_id=%s", user_id, exc_info=True)
+
+    def restore_snapshot(self) -> int:
+        """Синхронно заполняет telebot-зеркало из БД при создании Application.
+
+        Нужно для диагностики/старых E2E-тестов, которые читают bot.get_state до
+        вызова startup(). Источник истины — БД; startup() повторяет restore() уже
+        через асинхронный порт, поддерживающий любой SQLAlchemy-драйвер.
+        """
+        rows = self._persistent.load_all_sync()
+        bot = self._memory._bot
+        separator = bot.current_states.separator
+        prefix = bot.current_states.prefix
+        for user_id, chat_id, state, draft in rows:
+            key = separator.join((prefix, str(bot.bot_id), str(chat_id), str(user_id)))
+            bot.current_states.data[key] = {"state": state, "data": dict(draft)}
+        return len(rows)
+
+    async def restore(self) -> int:
+        rows = await self._persistent.load_all()
+        for user_id, chat_id, state, draft in rows:
+            await self._mirror(user_id, chat_id, state, draft)
+        if rows:
+            logger.info("FSM restored after restart: %s dialogs", len(rows))
+        return len(rows)
+
+
 class Application:
     """Собирает компоненты и управляет их жизненным циклом.
 
@@ -97,6 +165,9 @@ class Application:
         self._closed = False
         self._recovery_service: RecoveryService | None = None
         self._missed_post_handler: MissedPostHandler | None = None
+        self._dialog_state_store: DatabaseDialogStore | None = None
+        self._dialog_service: DialogService | None = None
+        self._reconcile_task: asyncio.Task[None] | None = None
         self._health_reporter = health_reporter
 
     @property
@@ -136,8 +207,9 @@ class Application:
         )
         scheduler = SchedulerService(post_repository, publication_service)
 
-        # MissedPostHandler uses the older publish gateway; delegate to the same
-        # execution path as the scheduler so persisted types remain authoritative.
+        # PM06-R2-008: единственная инициализация MissedPostHandler/RecoveryService.
+        # Оба пути восстановления используют актуальный PublisherResolver через
+        # PublicationService.execute(), поэтому типы публикаций из БД авторитетны.
         class _MissedExecutor:
             async def publish(self, post_id: int) -> bool:
                 return await publication_service.execute(post_id)
@@ -147,9 +219,15 @@ class Application:
         reschedule_service = RescheduleService(
             post_repository=post_repository,
             scheduler=scheduler,
+            strict_scheduler=True,
         )
+        dialog_store = HybridDialogStore(
+            TelebotDialogStore(bot), DatabaseDialogStore(session_factory)
+        )
+        # Восстанавливаем диагностическое telebot-зеркало сразу после сборки.
+        dialog_store.restore_snapshot()
         dialog_service = DialogService(
-            TelebotDialogStore(bot),
+            dialog_store,
             user_service=user_service,
             post_service=PostService(
                 post_repository,
@@ -157,6 +235,7 @@ class Application:
                 telegram_target_allowlist=settings.telegram_target_allowlist,
             ),
             reschedule_service=reschedule_service,
+            post_repository=post_repository,
         )
         my_posts_service = MyPostsService(
             post_repository=post_repository,
@@ -175,12 +254,6 @@ class Application:
             cancel_service=cancel_service,
         )
 
-        class _RecoveryExecutor:
-            async def publish(self, post_id: int) -> bool:
-                return await publication_service.execute(post_id)
-
-        missed_post_handler = MissedPostHandler(post_repository, _RecoveryExecutor())
-        recovery_service = RecoveryService(post_repository, scheduler, missed_post_handler)
         instance = cls(
             bot=bot,
             engine=engine,
@@ -196,6 +269,8 @@ class Application:
         )
         instance._recovery_service = recovery_service
         instance._missed_post_handler = missed_post_handler
+        instance._dialog_state_store = dialog_store._persistent
+        instance._dialog_service = dialog_service
         return instance
 
     async def startup(self) -> None:
@@ -207,6 +282,7 @@ class Application:
             raise StartupError(
                 "база данных недоступна или не готова, проверьте DATABASE_URL"
             ) from None
+        await self.restore_fsm()
         self._scheduler.start()
         # Восстановление заданий выполняется после запуска Scheduler,
         # чтобы schedule_post мог регистрировать задания.
@@ -218,6 +294,29 @@ class Application:
         # отчёт уже отражал запущенный Scheduler (SPEC-029).
         if self._health_reporter is not None:
             await self._health_reporter.start()
+        # PM06-R2-003: согласованность БД и APScheduler без обязательного рестарта.
+        self._reconcile_task = asyncio.create_task(
+            self._reconcile_loop(), name="scheduler-reconcile"
+        )
+
+    async def restore_fsm(self) -> int:
+        """PM06-R2-007: восстанавливает state/draft и чистит просроченные записи."""
+        if self._dialog_state_store is None:
+            return 0
+        await self._dialog_state_store.purge_expired_async()
+        hybrid = self._dialog_service._store if self._dialog_service is not None else None
+        if hybrid is None or not hasattr(hybrid, "restore"):
+            return 0
+        return await hybrid.restore()
+
+    async def _reconcile_loop(self) -> None:
+        interval = getattr(self._scheduler, "reconcile_interval", 30)
+        while True:
+            await asyncio.sleep(max(1, int(interval)))
+            try:
+                await self._scheduler.reconcile_pending()
+            except Exception:
+                logger.exception("Scheduler reconciliation failed")
 
     async def run(self) -> None:
         """Запускает приложение и работает до вызова stop(). Ресурсы освобождаются всегда."""
@@ -238,6 +337,11 @@ class Application:
         if self._closed:
             return
         self._closed = True
+        if self._reconcile_task is not None:
+            self._reconcile_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reconcile_task
+            self._reconcile_task = None
         if self._health_reporter is not None:
             await self._health_reporter.stop()
         self._scheduler.shutdown()

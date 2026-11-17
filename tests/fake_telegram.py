@@ -56,8 +56,14 @@ class FakeTelegram:
     sent_photos: list[dict[str, str | None]] = field(default_factory=list)
     # Ответы на answerCallbackQuery (PM-04).
     answered_callbacks: list[dict[str, Any]] = field(default_factory=list)
-    # Inline-сообщения с reply_markup (PM-04).
+    # Inline-сообщения с reply_markup (PM-04, PM-06-R2).
     sent_inline_markups: list[dict[str, Any]] = field(default_factory=list)
+    # Параметры исходящих запросов (PM06-R2-004: контроль parse_mode и caption).
+    sent_message_params: list[dict[str, str]] = field(default_factory=list)
+    sent_photo_params: list[dict[str, str]] = field(default_factory=list)
+    # Снятие inline-клавиатуры и ошибки ответа на callback (PM06-R2-006).
+    edited_markups: list[dict[str, Any]] = field(default_factory=list)
+    fail_answer_callback: tuple[int, str] | None = None
     # Хронологический порядок всех исходящих событий (sendMessage и sendPhoto).
     outbound_events: list[dict[str, Any]] = field(default_factory=list)
     fail_send_message: tuple[int, str] | None = None
@@ -257,8 +263,21 @@ class FakeTelegram:
             return await self._send_message(request)
         if method == "sendPhoto":
             return await self._send_photo(request)
+        if method == "editMessageReplyMarkup":
+            return await self._edit_reply_markup(request)
         if method == "answerCallbackQuery":
             return await self._answer_callback(request)
+        if method == "getFile":
+            params = await _request_params(request)
+            file_id = params.get("file_id", "unknown")
+            return _ok(
+                {
+                    "file_id": file_id,
+                    "file_unique_id": f"{file_id}-unique",
+                    "file_size": 1024,
+                    "file_path": "photos/file.jpg",
+                }
+            )
         return _ok(True)
 
     async def _send_message(self, request: web.Request) -> web.Response:
@@ -268,6 +287,7 @@ class FakeTelegram:
                 {"ok": False, "error_code": code, "description": description}, status=code
             )
         params = await _request_params(request)
+        self.sent_message_params.append(dict(params))
         chat_id = params.get("chat_id", "")
         text = params.get("text", "")
         reply_markup_raw = params.get("reply_markup")
@@ -291,6 +311,11 @@ class FakeTelegram:
         )
 
     async def _answer_callback(self, request: web.Request) -> web.Response:
+        if self.fail_answer_callback is not None:
+            code, description = self.fail_answer_callback
+            return web.json_response(
+                {"ok": False, "error_code": code, "description": description}, status=code
+            )
         params = await _request_params(request)
         self.answered_callbacks.append(
             {
@@ -307,6 +332,7 @@ class FakeTelegram:
                 {"ok": False, "error_code": code, "description": description}, status=code
             )
         params = await _request_params(request)
+        self.sent_photo_params.append(dict(params))
         chat_id = params.get("chat_id", "")
         photo = params.get("photo", "")
         caption = params.get("caption")
@@ -314,6 +340,18 @@ class FakeTelegram:
         self.outbound_events.append(
             {"method": "sendPhoto", "chat_id": chat_id, "photo": photo, "caption": caption}
         )
+        reply_markup_raw = params.get("reply_markup")
+        if reply_markup_raw:
+            try:
+                self.sent_inline_markups.append(
+                    {
+                        "chat_id": chat_id,
+                        "text": caption or "",
+                        "reply_markup": json.loads(reply_markup_raw),
+                    }
+                )
+            except (ValueError, TypeError):
+                pass
         chat_numeric_id = int(chat_id) if str(chat_id).lstrip("-").isdigit() else -1001234567890
         chat_type = "channel" if str(chat_id).startswith(("-100", "@")) else "private"
         result: dict[str, Any] = {
@@ -332,6 +370,22 @@ class FakeTelegram:
         if caption is not None:
             result["caption"] = caption
         return _ok(result)
+
+    async def _edit_reply_markup(self, request: web.Request) -> web.Response:
+        params = await _request_params(request)
+        self.edited_markups.append(dict(params))
+        chat_id = params.get("chat_id", "0")
+        return _ok(
+            {
+                "message_id": int(params.get("message_id") or 1),
+                "date": 1_700_000_000,
+                "chat": {
+                    "id": int(chat_id) if str(chat_id).lstrip("-").isdigit() else 1,
+                    "type": "private",
+                },
+                "text": "",
+            }
+        )
 
     async def _get_updates(self, request: web.Request) -> web.Response:
         params = await _request_params(request)

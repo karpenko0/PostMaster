@@ -15,10 +15,13 @@ from telebot.async_telebot import AsyncTeleBot
 class PublishResult:
     """Результат выполнения Publisher (SPEC-014 §14)."""
 
-    success: bool
+    success: bool = True
     error_code: str | None = None
     error_message: str | None = None
     retryable: bool = False
+    # Поля legacy-контракта SPEC-014/015/020 (PR #4 сузил DTO, сломав совместимость).
+    post_id: int | None = None
+    external_id: str | None = None
 
 
 @runtime_checkable

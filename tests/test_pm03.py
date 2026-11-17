@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from fake_telegram import TEST_TOKEN, FakeTelegram
-from harness import db_path, future_date_text, wait_for_state, wait_until
+from harness import db_path, future_date_text, latest_callback_data, wait_for_state, wait_until
 from postmaster.app import Application
 from postmaster.config import Settings
 from postmaster.domain.dialog import DialogState
@@ -26,7 +26,10 @@ async def test_user_can_schedule_both_types(
     async def confirm():
         # PM-05: confirm создаёт публикацию и отвечает сообщением.
         before = len(fake_telegram.sent_messages)
-        fake_telegram.add_callback_query("pm05:confirm", chat_id=42, user_id=42)
+        # PM06-R2-001: нажимаем кнопку конкретного черновика из последнего превью.
+        fake_telegram.add_callback_query(
+            latest_callback_data(fake_telegram, "pm05c:"), chat_id=42, user_id=42
+        )
         await wait_until(lambda: len(fake_telegram.sent_messages) >= before + 1)
 
     await text("/start", 1)

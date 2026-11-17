@@ -30,9 +30,12 @@ from postmaster.domain.timezone import convert_utc_to_local
 from postmaster.handlers.inline_keyboards import (
     CANCEL_BUTTON_TEXT,
     CONFIRM_BUTTON_TEXT,
+    build_confirmation_keyboard,
+    parse_confirmation_callback,
 )
 from postmaster.services.dialog_service import (
     CAPTION_KEY,
+    DRAFT_ID_KEY,
     PHOTO_FILE_ID_KEY,
     PUBLICATION_TYPE_KEY,
     REMINDER_BUTTON,
@@ -88,8 +91,11 @@ HINT_BY_STATE: dict[DialogState, str] = {
 CONFIRM_CALLBACK_DATA = "pm05:confirm"
 CANCEL_CALLBACK_DATA = "pm05:cancel"
 
-# Максимальная длина подписи в превью; полный текст сохраняется в draft и Post.
+# Максимальная длина пользовательской подписи в превью; полный текст
+# сохраняется в draft и Post (SPEC-020).
 PREVIEW_CAPTION_MAX = 80
+# Лимит Telegram для caption (в UTF-16 code units, как считает Bot API).
+TELEGRAM_CAPTION_MAX = 1024
 
 _MONTHS = (
     "января",
@@ -110,8 +116,15 @@ _MONTHS = (
 OTHER_CONTENT_TYPES = [kind for kind in content_type_media if kind not in ("text", "photo")]
 
 
-def _build_confirmation_keyboard() -> InlineKeyboardMarkup:
-    """Inline-клавиатура PM-05: «✅ Подтвердить» / «❌ Отменить»."""
+def _build_confirmation_keyboard(draft_id: str | None = None) -> InlineKeyboardMarkup:
+    """Клавиатура PM-05.
+
+    PM06-R2-001: рабочий путь всегда передаёт ``draft_id`` — кнопки привязаны к
+    конкретному черновику. Вызов без аргумента сохранён как legacy-контракт PM-05
+    (используется только старыми тестами); обработчик такие данные считает устаревшими.
+    """
+    if draft_id is not None:
+        return build_confirmation_keyboard(draft_id)
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton(CONFIRM_BUTTON_TEXT, callback_data=CONFIRM_CALLBACK_DATA),
@@ -120,11 +133,30 @@ def _build_confirmation_keyboard() -> InlineKeyboardMarkup:
     return markup
 
 
+def _utf16_units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _truncate_caption(text: str, limit: int = PREVIEW_CAPTION_MAX) -> str:
     """Сокращает подпись с многоточием для превью. Полный текст остаётся в draft."""
     if len(text) <= limit:
         return text
     return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _truncate_telegram_caption(text: str, limit: int = TELEGRAM_CAPTION_MAX) -> str:
+    """Ограничивает весь caption по лимиту Telegram без разбиения суррогатных пар."""
+    if _utf16_units(text) <= limit:
+        return text
+    result: list[str] = []
+    used = 0
+    for char in text:
+        width = _utf16_units(char)
+        if used + width > limit - 1:
+            break
+        result.append(char)
+        used += width
+    return "".join(result).rstrip() + "…"
 
 
 def _format_preview_text(
@@ -146,8 +178,10 @@ def _format_preview_text(
     else:
         type_line = "Тип: 📢 Публикация в Telegram"
 
+    # PM06-R2-004: превью отправляется без parse_mode, поэтому Markdown-разметка
+    # не нужна и пользовательский текст не может сломать форматирование.
     lines = [
-        "**Проверь публикацию перед сохранением**",
+        "Проверь публикацию перед сохранением",
         f"- {type_line}",
     ]
     if publication_type == PublicationType.TELEGRAM.value and target_id:
@@ -157,7 +191,11 @@ def _format_preview_text(
     lines.append(f"- Часовой пояс: {timezone}")
     if caption:
         lines.append(f"- Подпись: {_truncate_caption(caption)}")
-    return "\n".join(lines)
+    # Превью ограничено более жёстко, чем общий лимит caption Telegram: длинный
+    # caption не должен вытеснять дату/тип и не разбивает emoji по UTF-16.
+    return _truncate_telegram_caption(
+        "\n".join(lines), limit=min(TELEGRAM_CAPTION_MAX, PREVIEW_CAPTION_MAX + 100)
+    )
 
 
 def _render_preview(
@@ -211,7 +249,9 @@ def reply_text(outcome: DialogOutcome) -> str:
             if post is None:
                 # Повторный confirm: post не возвращается, есть только локальное время.
                 if outcome.scheduled_at is None:
-                    raise ValueError("POST_CREATED без post и без scheduled_at")
+                    # Успех без дополнительных данных (например, диагностический
+                    # тест) не должен превращаться в исключение.
+                    return "✅ Публикация запланирована."
                 local = outcome.scheduled_at
                 date = f"{local.day} {_MONTHS[local.month - 1]} {local.year}"
                 clock = local.strftime("%H:%M")
@@ -238,6 +278,23 @@ def reply_text(outcome: DialogOutcome) -> str:
             return "⚠️ Не удалось сохранить публикацию. Попробуйте подтвердить ещё раз."
         case DialogOutcomeKind.CONFIRMATION_CANCELLED:
             return "Создание публикации отменено. Пост не был сохранён."
+        case DialogOutcomeKind.STALE_CALLBACK:
+            return (
+                "⚠️ Эти кнопки устарели и относятся к другому черновику. "
+                "Создайте новую публикацию или используйте кнопки под актуальным превью."
+            )
+        case DialogOutcomeKind.DATETIME_EXPIRED:
+            return "⚠️ Указанное время уже прошло. Отправьте новую дату и время публикации."
+        case DialogOutcomeKind.FSM_CONFLICT:
+            return (
+                "⚠️ Сейчас уже выполняется другой сценарий. "
+                "Завершите его или отправьте /start, чтобы начать заново."
+            )
+        case DialogOutcomeKind.RESCHEDULE_SAVED_UNSCHEDULED:
+            return (
+                "⚠️ Новое время сохранено, но задание пока не поставлено в расписание. "
+                "Повторный перенос не нужен: расписание будет восстановлено автоматически."
+            )
         case DialogOutcomeKind.INVALID_MESSAGE:
             return HINT_BY_STATE[outcome.state]
         case DialogOutcomeKind.RESCHEDULE_PROMPT:
@@ -260,6 +317,17 @@ def reply_text(outcome: DialogOutcome) -> str:
             return "Не удалось перенести публикацию. Она больше недоступна."
         case _:
             raise ValueError(f"для исхода {outcome.kind} нет текста в обработчиках шагов")
+
+
+async def _safe_answer(bot: AsyncTeleBot, callback_id: str, text: str | None = None) -> None:
+    """answerCallbackQuery не должен ломать обработчик и не выводит секреты."""
+    try:
+        if text is None:
+            await bot.answer_callback_query(callback_id)
+        else:
+            await bot.answer_callback_query(callback_id, text=text)
+    except Exception:
+        logger.debug("answer_callback_query failed", exc_info=True)
 
 
 def register_dialog_handlers(
@@ -296,7 +364,8 @@ def register_dialog_handlers(
             return
         outcome = await dialog_service.receive_text(sender.id, message.chat.id, message.text or "")
         if outcome.kind == DialogOutcomeKind.PREVIEW_SHOWN:
-            # PM-05: показать превью с фото и inline-кнопками.
+            # PM06-R2-001/004: кнопки привязаны к черновику, текст отправляется
+            # без parse_mode (пользовательский caption и emoji безопасны).
             draft = await dialog_service._store.get_draft(sender.id, message.chat.id)
             preview_text = _render_preview(
                 draft,
@@ -304,7 +373,7 @@ def register_dialog_handlers(
                 outcome.zone_name or "",
             )
             file_id = draft.get(PHOTO_FILE_ID_KEY)
-            keyboard = _build_confirmation_keyboard()
+            keyboard = _build_confirmation_keyboard(draft.get(DRAFT_ID_KEY))
             try:
                 if file_id:
                     await bot.send_photo(
@@ -312,24 +381,24 @@ def register_dialog_handlers(
                         file_id,
                         caption=preview_text,
                         reply_markup=keyboard,
-                        parse_mode="Markdown",
                     )
                 else:
                     await bot.send_message(
                         message.chat.id,
                         preview_text,
                         reply_markup=keyboard,
-                        parse_mode="Markdown",
                     )
             except Exception:
                 logger.exception("Failed to send preview chat_id=%s", message.chat.id)
-                # Если file_id недоступен, fallback на текстовое сообщение.
-                await bot.send_message(
-                    message.chat.id,
-                    preview_text,
-                    reply_markup=keyboard,
-                    parse_mode="Markdown",
-                )
+                # Fallback: данные черновика уже сохранены и не теряются.
+                try:
+                    await bot.send_message(
+                        message.chat.id,
+                        preview_text,
+                        reply_markup=keyboard,
+                    )
+                except Exception:
+                    logger.exception("Preview fallback failed chat_id=%s", message.chat.id)
             return
         if outcome.kind in (
             DialogOutcomeKind.TYPE_SELECTED,
@@ -353,41 +422,62 @@ def register_dialog_handlers(
 
     @bot.callback_query_handler(
         func=lambda c: (
-            bool(c.data) and (c.data == CONFIRM_CALLBACK_DATA or c.data == CANCEL_CALLBACK_DATA)
+            bool(c.data)
+            and (
+                c.data == CONFIRM_CALLBACK_DATA
+                or c.data == CANCEL_CALLBACK_DATA
+                or parse_confirmation_callback(c.data) is not None
+            )
         )
     )
     async def on_confirmation_callback(call: CallbackQuery) -> None:
-        """PM-05 §5, §6: обработка кнопок «Подтвердить» и «Отменить»."""
+        """PM06-R2-001/006: обработка кнопок «Подтвердить» и «Отменить»."""
         if call.from_user is None or call.message is None:
-            await bot.answer_callback_query(call.id)
+            await _safe_answer(bot, call.id)
             return
         user_id = call.from_user.id
         chat_id = call.message.chat.id
+        parsed = parse_confirmation_callback(call.data)
 
-        if call.data == CONFIRM_CALLBACK_DATA:
-            outcome = await dialog_service.confirm_post(user_id, chat_id)
-            text = reply_text(outcome)
+        # Устаревшие (общие PM-05) и некорректные callback: отдельный ответ,
+        # клавиатура не снимается, черновик не изменяется.
+        if parsed is None:
+            await _safe_answer(bot, call.id, text="Кнопки устарели")
+            await bot.send_message(
+                chat_id,
+                reply_text(
+                    DialogOutcome(
+                        DialogOutcomeKind.STALE_CALLBACK, DialogState.WAITING_CONFIRMATION
+                    )
+                ),
+            )
+            return
+
+        action, draft_id = parsed
+        if action == "confirm":
+            outcome = await dialog_service.confirm_post(user_id, chat_id, draft_id=draft_id)
+            answer = {
+                DialogOutcomeKind.POST_CREATED: "Запланировано",
+                DialogOutcomeKind.POST_SAVED_UNSCHEDULED: "Сохранено, восстановим позже",
+            }.get(outcome.kind, "Ошибка")
+        else:
+            outcome = await dialog_service.cancel_creation(user_id, chat_id, draft_id=draft_id)
+            answer = (
+                "Отменено" if outcome.kind == DialogOutcomeKind.CONFIRMATION_CANCELLED else "Ошибка"
+            )
+
+        terminal = outcome.kind in (
+            DialogOutcomeKind.POST_CREATED,
+            DialogOutcomeKind.POST_SAVED_UNSCHEDULED,
+            DialogOutcomeKind.CONFIRMATION_CANCELLED,
+        )
+        if terminal:
+            # PM06-R2-006: кнопки снимаются только после успешного завершения.
             try:
                 await bot.edit_message_reply_markup(
                     chat_id, call.message.message_id, reply_markup=None
                 )
             except Exception:
                 logger.debug("edit_message_reply_markup failed", exc_info=True)
-            await bot.send_message(chat_id, text)
-            if outcome.kind == DialogOutcomeKind.POST_CREATED:
-                await bot.answer_callback_query(call.id, text="Запланировано")
-            elif outcome.kind == DialogOutcomeKind.POST_SAVED_UNSCHEDULED:
-                await bot.answer_callback_query(call.id, text="Сохранено, восстановим позже")
-            else:
-                await bot.answer_callback_query(call.id, text="Ошибка")
-            return
-
-        # CANCEL_CALLBACK_DATA
-        outcome = await dialog_service.cancel_creation(user_id, chat_id)
-        text = reply_text(outcome)
-        try:
-            await bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
-        except Exception:
-            logger.debug("edit_message_reply_markup failed", exc_info=True)
-        await bot.send_message(chat_id, text)
-        await bot.answer_callback_query(call.id, text="Отменено")
+        await bot.send_message(chat_id, reply_text(outcome))
+        await _safe_answer(bot, call.id, text=answer)

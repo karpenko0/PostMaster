@@ -5,6 +5,7 @@
 Секреты не попадают ни в repr, ни в текст ошибок (SPEC-023 §6).
 """
 
+import os
 import re
 from pathlib import Path
 from typing import Literal
@@ -14,8 +15,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dotenv import load_dotenv
 from pydantic import AliasChoices, Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from postmaster.domain.telegram_target import parse_allowlist
 
 DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///data/postmaster.db"
 DEFAULT_ENV_FILE = ".env"
@@ -33,6 +32,23 @@ _URL_CREDENTIALS_PATTERN = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
+# Локальная проверка allowlist без импорта domain: слой config не может зависеть
+# от других слоёв приложения (tests/test_architecture.py).
+_CHANNEL_PATTERN = re.compile(r"@[A-Za-z][A-Za-z0-9_]{4,31}", re.ASCII)
+_NUMERIC_CHANNEL_PATTERN = re.compile(r"-?[0-9]+", re.ASCII)
+
+
+def _validate_allowlist(value: str) -> str:
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if _CHANNEL_PATTERN.fullmatch(item) is None and not (
+            _NUMERIC_CHANNEL_PATTERN.fullmatch(item) is not None and int(item) != 0
+        ):
+            raise ValueError("некорректный идентификатор канала")
+    return value
+
 
 class ConfigError(RuntimeError):
     """Конфигурация некорректна. Текст ошибки не содержит значений переменных."""
@@ -47,7 +63,9 @@ class Settings(BaseSettings):
 
     bot_token: SecretStr = Field(description="Токен бота от @BotFather (BOT_TOKEN).")
     bot_proxy_url: str | None = Field(
-        default=None, repr=False, exclude=True,
+        default=None,
+        repr=False,
+        exclude=True,
         description="Proxy для Telegram API (BOT_PROXY_URL).",
     )
     database_url: str = Field(
@@ -87,6 +105,11 @@ class Settings(BaseSettings):
     )
 
     @property
+    def post_mode(self) -> str:
+        """Совместимость с SPEC-026: старое имя режима публикации по умолчанию."""
+        return self.default_post_mode
+
+    @property
     def secret_values(self) -> tuple[str, ...]:
         """Все секретные значения Settings, которые нельзя выводить в логи (SPEC-023 §4).
 
@@ -120,10 +143,9 @@ class Settings(BaseSettings):
     @classmethod
     def _check_allowlist(cls, value: str) -> str:
         try:
-            parse_allowlist(value)
+            return _validate_allowlist(value)
         except ValueError:
             raise ValueError("некорректный идентификатор канала") from None
-        return value
 
     @field_validator("bot_token")
     @classmethod
@@ -148,15 +170,24 @@ class Settings(BaseSettings):
             userinfo = parsed.netloc.rsplit("@", 1)[0] if "@" in parsed.netloc else None
             if (
                 parsed.scheme not in {"http", "socks5"}
-                or not host or port is None or not 1 <= port <= 65535
-                or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+                or not host
+                or port is None
+                or not 1 <= port <= 65535
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
                 or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value)
                 or "\\" in value
                 or re.search(r"%(?![0-9a-fA-F]{2})", value)
-                or (userinfo is not None and (
-                    "@" in userinfo or not parsed.username or not parsed.password
-                    or ":" not in userinfo
-                ))
+                or (
+                    userinfo is not None
+                    and (
+                        "@" in userinfo
+                        or not parsed.username
+                        or not parsed.password
+                        or ":" not in userinfo
+                    )
+                )
                 or any(ch in host for ch in "%/#?@")
             ):
                 raise ValueError
@@ -164,15 +195,18 @@ class Settings(BaseSettings):
             # проверен urlsplit при разборе адреса в квадратных скобках.
             ascii_host = host.encode("idna").decode("ascii")
             if ":" not in ascii_host and (
-                len(ascii_host) > 253 or not all(
+                len(ascii_host) > 253
+                or not all(
                     re.fullmatch(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?", label)
                     for label in ascii_host.rstrip(".").split(".")
                 )
             ):
                 raise ValueError
             if parsed.scheme == "socks5" and parsed.username is not None:
-                if any(len(unquote(part).encode("utf-8")) > 255
-                       for part in (parsed.username, parsed.password or "")):
+                if any(
+                    len(unquote(part).encode("utf-8")) > 255
+                    for part in (parsed.username, parsed.password or "")
+                ):
                     raise ValueError
         except (ValueError, UnicodeError):
             raise ValueError(error) from None
@@ -213,7 +247,14 @@ def load_settings(env_file: str | Path | None = DEFAULT_ENV_FILE) -> Settings:
     if env_file is not None and Path(env_file).is_file():
         load_dotenv(env_file, override=False)
     try:
-        return Settings()
+        settings = Settings()
+        # SPEC-026/PM-03: старый POST_MODE=TELEGRAM требовал канал по умолчанию.
+        if (
+            os.environ.get("POST_MODE", "").upper() == "TELEGRAM"
+            and not settings.telegram_target_id
+        ):
+            raise ConfigError("некорректная конфигурация: TELEGRAM_TARGET_ID: поле обязательно")
+        return settings
     except ValidationError as exc:
         problems = "; ".join(
             f"{'.'.join(str(part) for part in error['loc']).upper() or 'CONFIG'}: "
