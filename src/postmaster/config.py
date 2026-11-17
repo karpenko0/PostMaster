@@ -5,6 +5,7 @@
 Секреты не попадают ни в repr, ни в текст ошибок (SPEC-023 §6).
 """
 
+import logging
 import re
 from pathlib import Path
 from typing import Literal
@@ -15,6 +16,8 @@ from pydantic import AliasChoices, Field, SecretStr, ValidationError, field_vali
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from postmaster.domain.telegram_target import parse_allowlist
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///data/postmaster.db"
 DEFAULT_ENV_FILE = ".env"
@@ -182,7 +185,12 @@ def load_settings(env_file: str | Path | None = DEFAULT_ENV_FILE) -> Settings:
     # Проверка живёт на уровне загрузки настроек: сам Settings остаётся чистой моделью
     # и может собираться в тестах и утилитах без канала.
     if settings.default_post_mode == "TELEGRAM" and not (settings.telegram_target_id or "").strip():
-        raise ConfigError(
-            "некорректная конфигурация: TELEGRAM_TARGET_ID: обязателен при POST_MODE=TELEGRAM"
+        # Старый ``POST_MODE``/``DEFAULT_POST_MODE`` влияет только как резервный режим:
+        # пользователь выбирает тип публикации для каждого поста. Требовать канал при
+        # запуске поэтому нельзя — иначе бот не стартует на конфигурации, которая
+        # полностью работоспособна, а сообщение об ошибке не подсказывает причину.
+        logger.warning(
+            "POST_MODE=TELEGRAM без TELEGRAM_TARGET_ID: резервный канал не задан, "
+            "он понадобится только для постов без явно выбранного канала"
         )
     return settings

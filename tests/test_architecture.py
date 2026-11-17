@@ -38,7 +38,9 @@ ALLOWED_LAYER_DEPENDENCIES: dict[str, frozenset[str]] = {
     "utils": frozenset(),
     "domain": frozenset(),
     "database": frozenset(),
-    "bot": frozenset(),
+    # bot информирует о конфликте Long Polling через log_event из utils (SPEC-025):
+    # utils не зависит ни от чего, поэтому цикла нет.
+    "bot": frozenset({"utils"}),
     # config проверяет TELEGRAM_TARGET_ALLOWLIST чистой функцией из domain
     # (postmaster.domain.telegram_target): это единственное осознанное ребро,
     # у domain нет зависимостей, поэтому цикл невозможен (SPEC-001, SPEC-026).

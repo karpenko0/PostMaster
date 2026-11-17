@@ -142,6 +142,75 @@ mkdir -p data && sudo chown -R 1000:1000 data
 | 1   | Ошибка запуска или работы: токен отклонён, нет связи с Telegram, БД недоступна. Для `python -m postmaster health` — отчёт unhealthy, устарел, повреждён или отсутствует |
 | 2   | Ошибка конфигурации: неверный `BOT_TOKEN`, `LOG_LEVEL`, `DEFAULT_TIMEZONE`, `DEFAULT_POST_MODE` или `TELEGRAM_TARGET_ALLOWLIST` |
 
+## Бот запущен, но не отвечает: что проверить
+
+Бот работает через Long Polling, поэтому «молчит» он по трём причинам, и все три
+видны в логах при старте.
+
+### 1. Задан webhook
+
+Telegram отправляет апдейты на webhook, а `getUpdates` отвечает `409 Conflict`.
+Приложение пишет при старте:
+
+```
+У бота @name задан webhook (host). Long Polling не будет получать сообщения:
+удалите webhook (deleteWebhook) или запускайте бота через webhook.
+```
+
+Проверить и снять:
+
+```bash
+curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
+curl "https://api.telegram.org/bot<TOKEN>/deleteWebhook?drop_pending_updates=false"
+```
+
+### 2. На том же токене работает второй экземпляр
+
+Тот же `409 Conflict`, но webhook нет. Так бывает, когда контейнер не остановлен,
+а рядом запущен ещё один (`docker compose up` дважды, локальный запуск при работающем
+сервере, два хоста с одним `.env`). Приложение пишет:
+
+```
+Токен бота @name уже используется другим процессом (409 Conflict).
+Сообщения получает тот экземпляр: остановите лишний контейнер или запущенную копию бота.
+```
+
+Проверить:
+
+```bash
+docker compose ps          # один контейнер postmaster, статус healthy
+docker ps --filter name=postmaster
+```
+
+### 3. Токен и права
+
+- `401`/`404` на `getMe` → приложение завершается с кодом 1 и сообщением
+  «Telegram отклонил BOT_TOKEN». Токен в логи не попадает.
+- Публикация в канал требует, чтобы бот был **администратором** канала с правом
+  публикации сообщений. Без этого пост получает `FAILED` с
+  `TELEGRAM_PERMISSION_DENIED` в `post.error_message`.
+- Приватный канал указывается как `-100…`, публичный — как `@username`.
+
+### Что смотреть при любом сбое
+
+```bash
+docker compose logs -f postmaster        # или: journalctl -u postmaster -f
+python -m postmaster health              # 0 — healthy, 1 — причина в отчёте data/health.json
+cat data/health.json                     # процесс, БД, Scheduler
+sqlite3 data/postmaster.db "SELECT id, status, publication_type, error_message FROM posts ORDER BY id DESC LIMIT 10;"
+```
+
+Признаки в логах:
+
+| Строка в логе | Что означает |
+|---|---|
+| `event=startup` + `Бот подключён: @name` | токен верный, Long Polling пошёл |
+| `Polling is stopped.` без сигнала остановки | опрос прекращён: смотрите ERROR выше |
+| `Unhandled exception … Error code: 409` | webhook или второй экземпляр |
+| `event=publication_failed … retryable=False` | постоянная ошибка публикации, пост в `FAILED` |
+| `event=retry … delay_seconds=30` | временный сбой, повтор по SPEC-022 |
+| `Ошибка конфигурации: …` | запуск не состоялся, код выхода 2 |
+
 ## Управление публикациями (SPEC-017, PM-04)
 
 ### Команда `/my_posts`

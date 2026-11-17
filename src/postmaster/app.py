@@ -19,7 +19,7 @@ from telebot.async_telebot import AsyncTeleBot
 from telebot.asyncio_helper import ApiTelegramException
 
 from postmaster.bot.factory import close_bot_session, create_bot
-from postmaster.bot.transport import PollingTransport, Transport
+from postmaster.bot.transport import PollingConflictAlerter, PollingTransport, Transport
 from postmaster.config import ConfigError, Settings, load_settings
 from postmaster.database.backup import BackupError, create_backup
 from postmaster.database.engine import (
@@ -128,7 +128,13 @@ class Application:
         # PM-06 / BUG-07: состояние диалога и черновики хранятся в БД, а не в памяти.
         # telebot получает то же персистентное хранилище, поэтому FSM переживает рестарт.
         state_storage = SqlAlchemyStateStorage(session_factory)
-        bot = create_bot(settings.bot_token.get_secret_value(), state_storage=state_storage)
+        # 409 Conflict при Long Polling иначе виден только как ERROR библиотеки:
+        # бот «запущен, но не отвечает» (webhook или второй экземпляр на токене).
+        bot = create_bot(
+            settings.bot_token.get_secret_value(),
+            state_storage=state_storage,
+            exception_handler=PollingConflictAlerter(),
+        )
         telegram_client = BotTelegramClient(bot)
         reminder_publisher = ReminderPublisher(
             telegram_client=telegram_client,
@@ -321,6 +327,51 @@ class Application:
             log_event(logger, EVENT_STARTUP_ERROR, level=logging.ERROR, error="network")
             raise StartupError("Telegram API недоступен, проверьте сеть") from None
         logger.info("Бот подключён: @%s", me.username)
+        await self._check_transport_conflicts(me.username)
+
+    async def _check_transport_conflicts(self, username: str) -> None:
+        """Проверяет условия, при которых Long Polling не получает сообщения.
+
+        Telegram отвечает на ``getUpdates`` ошибкой 409 Conflict в двух случаях:
+
+        1. у бота задан webhook — апдейты уходят на сервер;
+        2. на том же токене уже работает второй экземпляр бота (частый случай:
+           контейнер не остановлен, а запущен ещё один, или локальный запуск при
+           работающем сервере).
+
+        В обоих случаях библиотека не роняет процесс: она пишет ERROR и повторяет
+        попытки с нарастающей паузой. Снаружи это выглядит как «бот запущен, но
+        не отвечает», поэтому проверка выполняется на старте и объясняет причину.
+        Приложение при этом не останавливается: webhook может быть рабочим, а
+        второй экземпляр — временным.
+
+        Второй случай ловится не пробным ``getUpdates`` (он сам вычитывает апдейты
+        и ломает Long Polling), а обработчиком ошибок библиотеки: см.
+        ``WebhookConflictAlerter`` в ``bot.transport``.
+        """
+        try:
+            info = await self._bot.get_webhook_info()
+        except Exception:
+            # Диагностика не должна мешать работе: сеть могла отказать только здесь.
+            logger.debug("Не удалось проверить webhook", exc_info=True)
+            return
+        url = getattr(info, "url", "") or ""
+        if url:
+            host = url.split("/")[2] if "://" in url else "unknown"
+            log_event(
+                logger,
+                EVENT_STARTUP_ERROR,
+                level=logging.WARNING,
+                error_code="webhook_blocks_polling",
+                webhook_host=host,
+            )
+            logger.warning(
+                "У бота @%s задан webhook (%s). Long Polling не будет получать сообщения: "
+                "удалите webhook (deleteWebhook) или запускайте бота через webhook.",
+                username,
+                host,
+            )
+            return
 
 
 async def _serve(settings: Settings) -> int:

@@ -64,6 +64,11 @@ class FakeTelegram:
     fail_send_photo: tuple[int, str] | None = None
     get_updates_called: asyncio.Event = field(default_factory=asyncio.Event)
     update_delivered: asyncio.Event = field(default_factory=asyncio.Event)
+    # Webhook, заданный у бота. При непустом значении getUpdates отвечает 409 Conflict,
+    # как настоящий Telegram: именно так выглядит «бот запущен, но не отвечает».
+    webhook_url: str = ""
+    # Ответ getUpdates ошибкой 409 (имитация второго экземпляра или webhook).
+    conflict_on_get_updates: bool = False
     _pending: list[dict[str, Any]] = field(default_factory=list)
     _update_ids: itertools.count = field(default_factory=lambda: itertools.count(1))
     _runner: web.AppRunner | None = None
@@ -251,7 +256,27 @@ class FakeTelegram:
             )
         if method == "getMe":
             return _ok(BOT_USER)
+        if method == "getWebhookInfo":
+            return _ok(
+                {
+                    "url": self.webhook_url,
+                    "has_custom_certificate": False,
+                    "pending_update_count": 0,
+                }
+            )
         if method == "getUpdates":
+            if self.conflict_on_get_updates or self.webhook_url:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error_code": 409,
+                        "description": (
+                            "Conflict: can't use getUpdates method while webhook is active; "
+                            "use deleteWebhook to delete the webhook first"
+                        ),
+                    },
+                    status=409,
+                )
             return await self._get_updates(request)
         if method == "sendMessage":
             return await self._send_message(request)

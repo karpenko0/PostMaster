@@ -1,6 +1,8 @@
 """TC-02: жизненный цикл приложения с тестовой конфигурацией, без внешней сети (US-02, AC-03)."""
 
 import asyncio
+import contextlib
+import logging
 import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,7 +12,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 from telebot.asyncio_helper import ApiTelegramException
 
-from fake_telegram import TEST_TOKEN
+from fake_telegram import TEST_TOKEN, FakeTelegram
+from harness import db_path
 from postmaster.app import Application, StartupError, main
 from postmaster.config import Settings
 from postmaster.database.engine import create_database_engine, create_session_factory
@@ -220,3 +223,66 @@ def test_main_exits_with_code_2_when_token_is_missing(
 
     assert info.value.code == 2
     assert "BOT_TOKEN" in capsys.readouterr().err
+
+
+async def test_startup_warns_when_webhook_blocks_polling(
+    fake_telegram: FakeTelegram, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """Заданный webhook делает Long Polling нерабочим — приложение обязано предупредить.
+
+    Регрессия: раньше бот писал только «бот подключён», затем бесконечно получал
+    409 Conflict от getUpdates. Снаружи это выглядит как «бот не работает».
+    """
+    fake_telegram.webhook_url = "https://example.com/hook"
+    settings = Settings(
+        bot_token=TEST_TOKEN,
+        database_url=f"sqlite+aiosqlite:///{db_path(tmp_path)}",
+        log_level="INFO",
+    )
+    app = Application.from_settings(settings)
+    with caplog.at_level(logging.WARNING):
+        await app.startup()
+        try:
+            await app._verify_token()  # noqa: SLF001 — проверяем именно диагностику старта
+        finally:
+            await app.shutdown()
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "webhook" in messages
+    assert "example.com" in messages
+
+
+async def test_polling_conflict_is_explained_once(
+    fake_telegram: FakeTelegram, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """409 Conflict на getUpdates означает второй экземпляр на том же токене.
+
+    Библиотека в этом случае не падает, а повторяет запросы с нарастающей паузой:
+    снаружи бот «запущен, но молчит». Приложение обязано объяснить причину в логе —
+    и ровно один раз, чтобы не залить журнал одинаковыми записями.
+    """
+    fake_telegram.conflict_on_get_updates = True
+    settings = Settings(
+        bot_token=TEST_TOKEN,
+        database_url=f"sqlite+aiosqlite:///{db_path(tmp_path)}",
+        log_level="INFO",
+    )
+    app = Application.from_settings(settings)
+    with caplog.at_level(logging.ERROR):
+        run_task = asyncio.create_task(app.run())
+        deadline = asyncio.get_running_loop().time() + 10
+        while fake_telegram.methods.count("getUpdates") < 3:
+            if asyncio.get_running_loop().time() > deadline:
+                break
+            await asyncio.sleep(0.05)
+        await app.stop()
+        # Опрос может быть в паузе между повторами: отмена прерывает её исключением.
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(run_task, timeout=10)
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if "409 Conflict" in record.getMessage() or "webhook" in record.getMessage()
+    ]
+    explanations = [text for text in warnings if "Проверьте getWebhookInfo" in text]
+    assert len(explanations) == 1, warnings

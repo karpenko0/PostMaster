@@ -111,9 +111,7 @@ class DialogStore(Protocol):
 
     async def set_draft(self, user_id: int, chat_id: int, draft: dict[str, str]) -> None: ...
 
-    async def save(
-        self, user_id: int, chat_id: int, *, state: str, draft: dict[str, str]
-    ) -> None:
+    async def save(self, user_id: int, chat_id: int, *, state: str, draft: dict[str, str]) -> None:
         """Атомарно записывает состояние и черновик одной операцией.
 
         PM-06 / BUG-07: раздельные ``set_state`` и ``set_draft`` дают окно, в котором

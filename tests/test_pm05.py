@@ -97,9 +97,7 @@ class InMemoryStore:
             raise RuntimeError("данные нельзя записать без состояния")
         self._drafts[(user_id, chat_id)] = dict(draft)
 
-    async def save(
-        self, user_id: int, chat_id: int, *, state: str, draft: dict[str, str]
-    ) -> None:
+    async def save(self, user_id: int, chat_id: int, *, state: str, draft: dict[str, str]) -> None:
         self._states[(user_id, chat_id)] = state
         self._drafts[(user_id, chat_id)] = dict(draft)
 

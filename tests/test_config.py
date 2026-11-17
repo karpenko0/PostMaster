@@ -82,9 +82,10 @@ def test_post_mode_defaults_and_telegram_target_validation(
 ) -> None:
     monkeypatch.setenv("BOT_TOKEN", TEST_TOKEN)
     assert load_settings(env_file=None).post_mode == "REMINDER"
+    # Резервный режим не требует канала: тип публикации выбирается для каждого поста.
+    # Отсутствие TELEGRAM_TARGET_ID даёт предупреждение, но не мешает запуску.
     monkeypatch.setenv("POST_MODE", "TELEGRAM")
-    with pytest.raises(ConfigError, match="TELEGRAM_TARGET_ID"):
-        load_settings(env_file=None)
+    assert load_settings(env_file=None).post_mode == "TELEGRAM"
     monkeypatch.setenv("TELEGRAM_TARGET_ID", "-1001234567890")
     settings = load_settings(env_file=None)
     assert settings.post_mode == "TELEGRAM"

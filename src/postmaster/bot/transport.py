@@ -8,11 +8,55 @@ import asyncio
 import logging
 from typing import Protocol, runtime_checkable
 
-from telebot.async_telebot import AsyncTeleBot
+from telebot.async_telebot import AsyncTeleBot, ExceptionHandler
+from telebot.asyncio_helper import ApiTelegramException
+
+from postmaster.utils.logging_config import log_event
 
 logger = logging.getLogger(__name__)
 
 POLLING_TIMEOUT_SECONDS = 20
+
+# Telegram отвечает этим кодом, когда токен занят webhook или другим экземпляром.
+CONFLICT_ERROR_CODE = 409
+# Полный текст конфликта содержит описание конфликта, но не секретов.
+CONFLICT_EVENT = "polling_conflict"
+
+
+class PollingConflictAlerter(ExceptionHandler):
+    """Объясняет в логе конфликт Long Polling вместо бесконечных ошибок библиотеки.
+
+    Библиотека при 409 Conflict не падает: она пишет ERROR и повторяет запросы с
+    нарастающей паузой (до 60 с). Снаружи бот «запущен, но не отвечает», а по логу
+    причина не видна. Здесь конфликт логируется один раз, чтобы диагноз был
+    очевиден, а остальные ошибки библиотека обрабатывает как обычно.
+
+    Проверка webhook на старте (``Application._check_transport_conflicts``) ловит
+    первый случай. Второй — занятый другим процессом токен — проявляется только
+    здесь: пробный ``getUpdates`` недопустим, он сам вычитывает апдейты.
+    """
+
+    def __init__(self) -> None:
+        self._reported = False
+
+    async def handle(self, exception: BaseException) -> bool:
+        if not isinstance(exception, ApiTelegramException):
+            return False
+        if exception.error_code != CONFLICT_ERROR_CODE or self._reported:
+            return False
+        self._reported = True
+        log_event(
+            logger,
+            CONFLICT_EVENT,
+            level=logging.ERROR,
+            error_code=CONFLICT_ERROR_CODE,
+        )
+        logger.error(
+            "Long Polling получает 409 Conflict: у бота задан webhook или токен уже "
+            "используется другим процессом. Пока конфликт не устранён, сообщения "
+            "не обрабатываются. Проверьте getWebhookInfo и запущенные копии бота."
+        )
+        return False
 
 
 @runtime_checkable
