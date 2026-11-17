@@ -256,6 +256,9 @@ class FakeTelegram:
             )
         if method == "getMe":
             return _ok(BOT_USER)
+        if method == "deleteWebhook":
+            self.webhook_url = ""
+            return _ok(True)
         if method == "getWebhookInfo":
             return _ok(
                 {

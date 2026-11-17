@@ -8,6 +8,7 @@
 import asyncio
 import contextlib
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
@@ -20,7 +21,7 @@ from telebot.asyncio_helper import ApiTelegramException
 
 from postmaster.bot.factory import close_bot_session, create_bot
 from postmaster.bot.transport import PollingConflictAlerter, PollingTransport, Transport
-from postmaster.config import ConfigError, Settings, load_settings
+from postmaster.config import DEFAULT_ENV_FILE, ConfigError, Settings, load_settings
 from postmaster.database.backup import BackupError, create_backup
 from postmaster.database.engine import (
     check_database,
@@ -529,6 +530,182 @@ def _database_file_path(database_url: str) -> Path | None:
     if not database or database == ":memory:" or database.startswith("file:"):
         return None
     return Path(database)
+
+
+# === Диагностика «бот молчит» (doctor) ======================================
+
+DOCTOR_OK = 0
+DOCTOR_PROBLEMS = 1
+DOCTOR_CONFIG_ERROR = 2
+
+
+def _doctor_line(status: str, title: str, detail: str = "") -> None:
+    """Строка отчёта doctor. Секреты в отчёт не попадают: только имена настроек."""
+    print(f"[{status}] {title}" + (f" — {detail}" if detail else ""))
+
+
+async def _doctor_probe(settings: Settings, *, delete_webhook: bool = False) -> int:
+    """Проверяет всё, что мешает боту отвечать, и печатает отчёт.
+
+    Проверки идут от самых частых причин к редким; первая же ошибка объясняет
+    диагноз. Сеть используется только для запросов к Telegram, токен не печатается.
+    """
+    problems = 0
+    token = settings.bot_token.get_secret_value()
+    bot = create_bot(token)
+
+    # 1. Токен живой?
+    try:
+        me = await bot.get_me()
+    except ApiTelegramException as exc:
+        code = exc.error_code
+        if code in _TOKEN_REJECTED_CODES:
+            _doctor_line(
+                "ОШИБКА",
+                "BOT_TOKEN отклонён Telegram",
+                f"код {code}. Проверьте токен у @BotFather и что .env в текущем каталоге",
+            )
+        else:
+            _doctor_line("ОШИБКА", "Telegram вернул ошибку", f"код {code}")
+        await close_bot_session()
+        return DOCTOR_PROBLEMS
+    except Exception:
+        _doctor_line(
+            "ОШИБКА",
+            "Нет связи с api.telegram.org",
+            "проверьте сеть/прокси; локальный запуск без интернета не получит сообщения",
+        )
+        await close_bot_session()
+        return DOCTOR_PROBLEMS
+    _doctor_line("OK", f"Токен верный, бот @{me.username}")
+
+    # 2. Webhook: при нём getUpdates всегда 409, бот молчит.
+    try:
+        info = await bot.get_webhook_info()
+        url = getattr(info, "url", "") or ""
+    except Exception:
+        url = ""
+        _doctor_line("ПРОПУСК", "getWebhookInfo недоступен", "проверка webhook не выполнена")
+    if url:
+        host = url.split("/")[2] if "://" in url else "unknown"
+        if delete_webhook:
+            removed = await bot.delete_webhook(drop_pending_updates=False)
+            if removed:
+                url = ""
+                _doctor_line("ИСПРАВЛЕНО", "Webhook удалён", f"был host={host}")
+            else:
+                problems += 1
+                _doctor_line("ОШИБКА", "Webhook не удалён", f"Telegram отказал, host={host}")
+        else:
+            problems += 1
+            _doctor_line(
+                "ОШИБКА",
+                "У бота задан webhook",
+                f"host={host}. Long Polling не получает сообщения; "
+                "снять: python -m postmaster doctor --delete-webhook",
+            )
+    else:
+        _doctor_line("OK", "Webhook не задан (Long Polling может получать сообщения)")
+
+    # 3. Занятый токен: пробный getUpdates не вычитывает апдейты (offset=-1, timeout=0).
+    # При заданном webhook 409 — его следствие, поэтому отдельно не проверяем.
+    if not url:
+        try:
+            await bot.get_updates(offset=-1, limit=1, timeout=0)
+            _doctor_line("OK", "Токен не занят другим процессом (нет 409 Conflict)")
+        except ApiTelegramException as exc:
+            if exc.error_code == 409:
+                problems += 1
+                _doctor_line(
+                    "ОШИБКА",
+                    "Токен уже используется другим процессом (409 Conflict)",
+                    "остановите лишний контейнер или запущенную копию бота",
+                )
+            else:
+                _doctor_line("ПРОПУСК", "Пробный getUpdates вернул ошибку", f"код {exc.error_code}")
+        except Exception:
+            _doctor_line("ПРОПУСК", "Пробный getUpdates не выполнен", "сеть/прокси")
+
+    # 4. База данных: без неё приложение не стартует.
+    engine = create_database_engine(settings.database_url)
+    try:
+        await check_database(engine)
+        await create_schema(engine)
+        _doctor_line("OK", "База данных доступна, схема актуальна")
+    except Exception:
+        problems += 1
+        location = _database_file_path(settings.database_url)
+        _doctor_line(
+            "ОШИБКА",
+            "База данных недоступна",
+            f"DATABASE_URL={settings.database_url.split(':')[0]}…, файл {location}",
+        )
+    finally:
+        await engine.dispose()
+
+    # 5. Права и каталог данных (частый случай в Docker: uid 1000).
+    health_target = Path(settings.health_file).parent
+    if health_target.exists() and not os.access(health_target, os.W_OK):
+        problems += 1
+        _doctor_line("ОШИБКА", "Нет прав на запись в каталог данных", str(health_target))
+    else:
+        _doctor_line("OK", "Каталог данных доступен на запись", str(health_target))
+
+    # 6. Канал из настроек: публикация требует администратора канала.
+    if (settings.telegram_target_id or "").strip():
+        try:
+            chat = await bot.get_chat(settings.telegram_target_id.strip())
+            _doctor_line(
+                "OK", "Канал из TELEGRAM_TARGET_ID доступен", str(getattr(chat, "title", ""))
+            )
+        except ApiTelegramException as exc:
+            problems += 1
+            _doctor_line(
+                "ОШИБКА",
+                "Telegram не отдаёт канал из TELEGRAM_TARGET_ID",
+                f"код {exc.error_code}: добавьте бота администратором канала",
+            )
+        except Exception:
+            _doctor_line("ПРОПУСК", "Канал не проверен", "сеть/прокси")
+
+    # 7. .env и рабочая директория: локальный запуск читает .env из текущего каталога.
+    if Path(DEFAULT_ENV_FILE).is_file():
+        _doctor_line("OK", "Найден .env в текущем каталоге", str(Path.cwd()))
+    else:
+        _doctor_line(
+            "ВНИМАНИЕ",
+            "Нет .env в текущем каталоге",
+            f"cwd={Path.cwd()}; настройки читаются только из окружения",
+        )
+
+    await close_bot_session()
+    if problems:
+        print(f"\nНайдено проблем: {problems}. Пока они не устранены, бот не будет отвечать.")
+        return DOCTOR_PROBLEMS
+    print("\nПроблем не найдено: токен, транспорт, БД и канал в порядке.")
+    return DOCTOR_OK
+
+
+def doctor_main(argv: list[str] | None = None) -> int:
+    """Точка входа ``python -m postmaster doctor``.
+
+    Отвечает на вопрос «почему бот молчит»: проверяет токен, webhook, конфликт
+    Long Polling, БД, права на каталог данных и доступность канала. Возвращает
+    0 — проблем нет, 1 — найдены проблемы, 2 — ошибка конфигурации.
+
+    ``--delete-webhook`` (он же ``--fix``) снимает webhook: это единственная
+    автоматическая правка, потому что именно она чаще всего возвращает боту
+    приём сообщений. Остальные проблемы требуют решения человека.
+    """
+    try:
+        settings = load_settings()
+    except Exception as exc:  # noqa: BLE001 — ConfigError или OSError от dotenv
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        return DOCTOR_CONFIG_ERROR
+    delete_webhook = any(arg in {"--delete-webhook", "--fix"} for arg in (argv or []))
+    configure_logging("WARNING", secrets=settings.secret_values)
+    print(f"Каталог запуска: {Path.cwd()}")
+    return asyncio.run(_doctor_probe(settings, delete_webhook=delete_webhook))
 
 
 def health_main(argv: list[str] | None = None) -> int:
