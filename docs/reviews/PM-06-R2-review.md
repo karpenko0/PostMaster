@@ -148,7 +148,15 @@
 плюс job «Проверка Dockerfile и compose»: `cp .env.example .env && docker compose config` (compose объявляет
 `env_file: .env`, без файла проверка падала). `pytest-timeout` добавлен в dev-зависимости.
 
-Первый прогон CI на ветке упал именно на шаге `docker compose config`; исправление добавлено, ожидается зелёный прогон.
+Прогоны на ветке:
+
+| Run | Коммит | Результат |
+|---|---|---|
+| `44128971750` | `adf6dad` | ❌ job `docker` — падение на шаге `docker compose config` (нет `.env`) |
+| `44291208914` | `f68f4b3` | ✅ `quality` (Python 3.12) — success, `docker` — success |
+
+То есть на Python 3.12 зелёными оказались и subprocess/CLI-тесты, которые локально падают из-за 3.11,
+и единственное локальное падение (`test_python_is_312_or_newer`) в CI отсутствует.
 
 ## 8. Ограничения и что не делалось
 
