@@ -229,6 +229,9 @@ class Application:
         dialog_service = DialogService(
             dialog_store,
             user_service=user_service,
+            # PM-03: канал проверяется уже на шаге ввода (WAITING_TARGET), поэтому
+            # allowlist должен быть известен и DialogService, а не только PostService.
+            telegram_target_allowlist=settings.telegram_target_allowlist,
             post_service=PostService(
                 post_repository,
                 scheduler,
