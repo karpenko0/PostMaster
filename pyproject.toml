@@ -26,6 +26,8 @@ dependencies = [
 dev = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<2",
+    # --timeout=120 в CI защищает от зависших Long Polling-тестов.
+    "pytest-timeout>=2.3,<3",
     "ruff>=0.6,<1",
 ]
 

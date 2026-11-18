@@ -12,7 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telebot.asyncio_helper import ApiTelegramException
 
 from fake_telegram import TEST_TOKEN, FakeTelegram
-from harness import db_path, future_date_text, wait_for_state, wait_until
+from harness import (
+    db_path,
+    future_date_text,
+    latest_callback_data,
+    wait_for_state,
+    wait_until,
+)
 from postmaster.app import Application
 from postmaster.bot.factory import create_bot
 from postmaster.config import Settings
@@ -21,6 +27,7 @@ from postmaster.database.schema import create_schema
 from postmaster.domain.dialog import DialogState
 from postmaster.domain.post import Post, PostStatus, PublicationType
 from postmaster.domain.user import User
+from postmaster.handlers.dialog import TELEGRAM_BUTTON
 from postmaster.publishers.base import (
     BotTelegramClient,
     Publisher,
@@ -618,10 +625,20 @@ async def test_e2e_59_automatic_channel_publication_from_dialog_to_published(
         await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
 
         fake_telegram.add_photo_message("channel-e2e-photo", chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_PUBLICATION_TYPE)
+        # PM-03: тип публикации и канал вводятся явно (PM-05: затем превью и confirm).
+        fake_telegram.add_text_message(TELEGRAM_BUTTON, chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_TARGET)
+        fake_telegram.add_text_message(CHANNEL_ID, chat_id=42, user_id=42)
         await wait_for_state(app, 42, DialogState.WAITING_DATETIME)
 
+        photos_before = len(fake_telegram.sent_photos)
         fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
-        await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+        await wait_until(lambda: len(fake_telegram.sent_photos) > photos_before)
+        await wait_for_state(app, 42, DialogState.WAITING_CONFIRMATION)
+        fake_telegram.add_callback_query(
+            latest_callback_data(fake_telegram, "pm05c:"), chat_id=42, user_id=42
+        )
         await wait_for_state(app, 42, DialogState.IDLE)
 
         with sqlite3.connect(db_path(tmp_path)) as conn:
@@ -633,13 +650,13 @@ async def test_e2e_59_automatic_channel_publication_from_dialog_to_published(
         # Наступает запланированное время публикации.
         await app._scheduler._on_post_due(post_id)
 
-        assert fake_telegram.sent_photos == [
-            {
-                "chat_id": CHANNEL_ID,
-                "photo": "channel-e2e-photo",
-                "caption": None,
-            }
-        ]
+        # Превью тоже уходит через sendPhoto, поэтому проверяем событие публикации —
+        # последнее: оно адресовано каналу.
+        assert fake_telegram.sent_photos[-1] == {
+            "chat_id": CHANNEL_ID,
+            "photo": "channel-e2e-photo",
+            "caption": None,
+        }
         with sqlite3.connect(db_path(tmp_path)) as conn:
             final_status, published_at, error_msg = conn.execute(
                 "SELECT status, published_at, error_message FROM posts WHERE id=?",

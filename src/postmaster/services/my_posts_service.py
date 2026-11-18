@@ -104,12 +104,8 @@ class MyPostsService:
         lines = ["Ваши запланированные публикации:\n"]
         for index, post in enumerate(posts, start=1):
             local_time = format_local_datetime(post.scheduled_at_utc, post.timezone)
-            label = _PUBLICATION_TYPE_SHORT.get(
-                post.publication_type, post.publication_type.value
-            )
-            lines.append(
-                f"{index}. ID {post.id} — {local_time} ({label})\n"
-            )
+            label = _PUBLICATION_TYPE_SHORT.get(post.publication_type, post.publication_type.value)
+            lines.append(f"{index}. ID {post.id} — {local_time} ({label})\n")
         return "".join(lines).rstrip() + "\n"
 
     async def list_view(self, telegram_user_id: int) -> MyPostsView:
@@ -142,9 +138,7 @@ def render_post_block(post: Post) -> str:
     local = post.scheduled_at_utc.astimezone(ZoneInfo(post.timezone))
     date = f"{local.day:02d}.{local.month:02d}.{local.year:04d}"
     clock = f"{local.hour:02d}:{local.minute:02d}"
-    type_label = _PUBLICATION_TYPE_LABELS.get(
-        post.publication_type, post.publication_type.value
-    )
+    type_label = _PUBLICATION_TYPE_LABELS.get(post.publication_type, post.publication_type.value)
     lines = [
         f"Пост #{post.id} (ID {post.id})",
         f"Тип: {type_label}",

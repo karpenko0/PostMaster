@@ -9,10 +9,18 @@ import pytest
 from sqlalchemy import update
 
 from fake_telegram import FakeTelegram
-from harness import db_path, db_snapshot, users_rows, wait_for_state, wait_until
+from harness import (
+    db_path,
+    db_snapshot,
+    latest_callback_data,
+    users_rows,
+    wait_for_state,
+    wait_until,
+)
 from postmaster.app import Application
 from postmaster.database.models import UserModel
 from postmaster.domain.dialog import DialogState
+from postmaster.handlers.dialog import REMINDER_BUTTON
 from postmaster.services import dialog_service
 from postmaster.services.post_service import PostService
 from postmaster.services.scheduler_service import SchedulerService
@@ -62,19 +70,27 @@ async def test_profile_timezone_fallback_conversion_and_handoff(
                 )
         fake_telegram.add_photo_message("image", chat_id=42, user_id=42)
         await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
+        # PM-03: после фото бот предлагает выбрать тип публикации.
+        fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=42, user_id=42)
         await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
-        before = db_snapshot(db_path(tmp_path))
+        before = db_snapshot(db_path(tmp_path), tables=("users", "posts"))
+        photos_before = len(fake_telegram.sent_photos)
         fake_telegram.add_text_message("07.10.2026 15:00", chat_id=42, user_id=42)
-        await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+        await wait_until(lambda: len(fake_telegram.sent_photos) > photos_before)
+        await wait_for_state(running_app, 42, DialogState.WAITING_CONFIRMATION)
+        # PM-05: Post создаётся только после подтверждения превью.
+        assert received == []
+        fake_telegram.add_callback_query(
+            latest_callback_data(fake_telegram, "pm05c:"), chat_id=42, user_id=42
+        )
         await wait_for_state(running_app, 42, DialogState.IDLE)
-        assert "📅 7 октября 2026\n⏰ 15:00" in fake_telegram.sent_messages[2]["text"]
         assert len(received) == 1
         assert received[0]["scheduled_at_utc"] == scheduled_utc
         assert received[0]["timezone"] == resolved_timezone
         assert received[0]["telegram_file_id"] == "image"
         assert received[0]["telegram_file_unique_id"] == "image-l"
         assert received[0]["user_id"] == users_rows(db_path(tmp_path), 42)[0][0]
-        posts = db_snapshot(db_path(tmp_path))["posts"]
+        posts = db_snapshot(db_path(tmp_path), tables=("posts",))["posts"]
         assert len(posts) == len(before["posts"]) + 1
         assert posts[-1][4].startswith(scheduled_utc.strftime("%Y-%m-%d %H:%M"))
         assert posts[-1][5] == resolved_timezone

@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from postmaster.database.models import PostModel, UserModel
@@ -36,6 +37,9 @@ from postmaster.utils.logging_config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# PM06-R2-003: допустимое расхождение часов/точность хранения SQLite (микросекунды).
+SCHEDULE_TOLERANCE = timedelta(seconds=2)
 
 
 def _to_storage(value: datetime | None, name: str) -> datetime:
@@ -66,6 +70,8 @@ def _to_domain(model: PostModel) -> Post:
         updated_at=_from_storage(model.updated_at),
         published_at=None if model.published_at is None else _from_storage(model.published_at),
         caption=model.caption,
+        source_draft_id=model.source_draft_id,
+        schedule_version=model.schedule_version or 0,
     )
 
 
@@ -87,6 +93,7 @@ class PostRepository:
         target_id: str | None = None,
         caption: str | None = None,
         now: datetime | None = None,
+        source_draft_id: str | None = None,
     ) -> Post:
         """Создаёт одну PENDING-запись, связанную с users.id (RT-008-01, ERR-008-01…05)."""
         if not telegram_file_id or not telegram_file_id.strip():
@@ -116,6 +123,8 @@ class PostRepository:
                 updated_at=timestamp,
                 published_at=None,
                 caption=caption,
+                source_draft_id=source_draft_id,
+                schedule_version=0,
             )
             session.add(model)
             await session.flush()
@@ -128,6 +137,43 @@ class PostRepository:
             status="PENDING",
         )
         return post
+
+    async def create_post_idempotent(
+        self,
+        *,
+        source_draft_id: str,
+        **kwargs,
+    ) -> Post:
+        """PM06-R2-002: создаёт Post ровно один раз для одного черновика.
+
+        Уникальность обеспечивается индексом ``uq_posts_source_draft_id`` на уровне БД,
+        поэтому защита работает и для нескольких экземпляров приложения, и после
+        аварийного завершения между commit и ответом пользователю. При конфликте
+        возвращается уже существующая запись.
+        """
+        key = source_draft_id.strip()
+        if not key:
+            raise ValueError("source_draft_id обязателен")
+        if len(key) > 64:
+            raise ValueError("source_draft_id длиннее 64 символов")
+        try:
+            return await self.create_post(**kwargs, source_draft_id=key)
+        except IntegrityError:
+            existing = await self.get_by_source_draft_id(key)
+            if existing is None:
+                raise
+            owner = kwargs.get("user_id")
+            if owner is not None and existing.user_id != owner:
+                raise ValueError("черновик принадлежит другому пользователю") from None
+            logger.info("Idempotent post creation returned existing post post_id=%s", existing.id)
+            return existing
+
+    async def get_by_source_draft_id(self, source_draft_id: str) -> Post | None:
+        """Возвращает Post по постоянному ключу черновика или None."""
+        statement = select(PostModel).where(PostModel.source_draft_id == source_draft_id)
+        async with self._session_factory() as session:
+            model = (await session.scalars(statement)).first()
+            return None if model is None else _to_domain(model)
 
     async def get_by_id(self, post_id: int) -> Post | None:
         """Получает запись без авторизации; для пользовательской операции проверьте владельца."""
@@ -174,13 +220,17 @@ class PostRepository:
 
         Право на публикацию даёт только rowcount=1: если запись уже забрана другим
         исполнителем или её статус изменился (например, отмена), метод возвращает None.
-        Одним условным UPDATE обеспечивается взаимная исключительность claim и cancel.
+        PM06-R2-003: дополнительно проверяется, что время публикации уже наступило.
         """
         stamp = _to_storage(now if now is not None else utc_now(), "now")
         async with self._session_factory() as session, session.begin():
             result = await session.execute(
                 update(PostModel)
-                .where(PostModel.id == post_id, PostModel.status == PostStatus.PENDING.value)
+                .where(
+                    PostModel.id == post_id,
+                    PostModel.status == PostStatus.PENDING.value,
+                    PostModel.scheduled_at_utc <= stamp + SCHEDULE_TOLERANCE,
+                )
                 .values(status=PostStatus.PROCESSING.value, updated_at=stamp)
             )
             if result.rowcount != 1:
@@ -260,16 +310,38 @@ class PostRepository:
         post_id: int,
         *,
         now: datetime | None = None,
+        expected_schedule_version: int | None = None,
+        expected_run_at: datetime | None = None,
+        tolerance: timedelta | None = None,
+        ignore_schedule: bool = False,
     ) -> bool:
-        """Атомарный захват PENDING → PROCESSING без предварительного SELECT (SPEC-013 §13–16)."""
+        """Атомарный захват PENDING → PROCESSING без предварительного SELECT.
+
+        PM06-R2-003: защита от устаревших заданий APScheduler. Захват разрешён только
+        если время публикации уже наступило (с допуском на расхождение часов), а
+        переданные версия расписания и run_at совпадают с актуальной записью в БД.
+        Просроченные публикации по-прежнему захватываются Recovery/MissedPostHandler.
+        """
         stamp = _to_storage(now if now is not None else utc_now(), "now")
+        allowance = SCHEDULE_TOLERANCE if tolerance is None else tolerance
+        conditions = [PostModel.id == post_id, PostModel.status == PostStatus.PENDING.value]
+        if ignore_schedule:
+            # Явный ручной вызов (legacy PublicationService.publish) не является
+            # заданием Scheduler: проверка времени для него неприменима.
+            pass
+        elif expected_run_at is not None:
+            # Точное совпадение run_at с актуальным расписанием доказывает, что
+            # задание не устарело: проверка «время уже наступило» избыточна и
+            # ломалась бы при расхождении часов процесса и APScheduler.
+            conditions.append(PostModel.scheduled_at_utc == _to_storage(expected_run_at, "run_at"))
+        else:
+            conditions.append(PostModel.scheduled_at_utc <= stamp + allowance)
+        if expected_schedule_version is not None:
+            conditions.append(PostModel.schedule_version == expected_schedule_version)
         async with self._session_factory() as session, session.begin():
             result = await session.execute(
                 update(PostModel)
-                .where(
-                    PostModel.id == post_id,
-                    PostModel.status == PostStatus.PENDING.value,
-                )
+                .where(*conditions)
                 .values(
                     status=PostStatus.PROCESSING.value,
                     updated_at=stamp,
@@ -278,7 +350,7 @@ class PostRepository:
         if result.rowcount == 1:
             logger.info("Post claimed for processing post_id=%s", post_id)
             return True
-        logger.info("Post claim skipped post_id=%s", post_id)
+        logger.info("Post claim skipped post_id=%s (not due, stale job or status changed)", post_id)
         return False
 
     async def mark_published(
@@ -411,6 +483,7 @@ class PostRepository:
             )
             return True
         return False
+
     async def reschedule_post(
         self,
         post_id: int,
@@ -435,7 +508,11 @@ class PostRepository:
                     PostModel.user_id == user_id,
                     PostModel.status == PostStatus.PENDING.value,
                 )
-                .values(scheduled_at_utc=when, updated_at=stamp)
+                .values(
+                    scheduled_at_utc=when,
+                    updated_at=stamp,
+                    schedule_version=PostModel.schedule_version + 1,
+                )
             )
             if result.rowcount != 1:
                 return None

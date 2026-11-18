@@ -13,7 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telebot.asyncio_helper import ApiTelegramException
 
 from fake_telegram import FakeTelegram
-from harness import db_path, future_date_text, wait_for_state, wait_until
+from harness import (
+    db_path,
+    future_date_text,
+    latest_callback_data,
+    wait_for_state,
+    wait_until,
+)
 from postmaster.app import Application
 from postmaster.bot.factory import create_bot
 from postmaster.database.engine import create_database_engine, create_session_factory
@@ -21,6 +27,7 @@ from postmaster.database.schema import create_schema
 from postmaster.domain.dialog import DialogState
 from postmaster.domain.post import Post, PostStatus, PublicationType
 from postmaster.domain.user import User
+from postmaster.handlers.dialog import REMINDER_BUTTON
 from postmaster.publishers.base import (
     BotTelegramClient,
     Publisher,
@@ -510,10 +517,18 @@ async def test_e2e_54_normal_reminder_flow_delivers_message_and_photo_and_marks_
     await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
 
     fake_telegram.add_photo_message("reminder-e2e-photo", chat_id=42, user_id=42)
+    await wait_for_state(running_app, 42, DialogState.WAITING_PUBLICATION_TYPE)
+    # PM-03: тип публикации выбирается явно, затем вводится дата.
+    fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=42, user_id=42)
     await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
 
+    photos_before = len(fake_telegram.sent_photos)
     fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+    await wait_until(lambda: len(fake_telegram.sent_photos) > photos_before)
+    await wait_for_state(running_app, 42, DialogState.WAITING_CONFIRMATION)
+    fake_telegram.add_callback_query(
+        latest_callback_data(fake_telegram, "pm05c:"), chat_id=42, user_id=42
+    )
     await wait_for_state(running_app, 42, DialogState.IDLE)
 
     with sqlite3.connect(db_path(tmp_path)) as conn:

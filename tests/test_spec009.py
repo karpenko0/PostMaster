@@ -11,14 +11,22 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fake_telegram import TEST_TOKEN, FakeTelegram
-from harness import db_path, draft_data, future_date_text, users_rows, wait_for_state, wait_until
+from harness import (
+    db_path,
+    draft_data,
+    future_date_text,
+    latest_callback_data,
+    users_rows,
+    wait_for_state,
+    wait_until,
+)
 from postmaster.app import Application
 from postmaster.config import Settings
 from postmaster.database.engine import create_database_engine, create_session_factory
 from postmaster.database.schema import create_schema
 from postmaster.domain.dialog import DialogState
 from postmaster.domain.post import PostStatus, PublicationType
-from postmaster.handlers.dialog import reply_text
+from postmaster.handlers.dialog import REMINDER_BUTTON, TELEGRAM_BUTTON, reply_text
 from postmaster.repositories.post_repository import PostRepository
 from postmaster.repositories.user_repository import UserRepository
 from postmaster.services.dialog_service import DialogOutcome, DialogOutcomeKind
@@ -209,7 +217,9 @@ async def test_real_scheduler_creates_date_job_with_id_and_utc(repository_db) ->
         )
         job = scheduler._scheduler.get_job(f"post:{post.id}")
         assert job is not None
-        assert job.args == (post.id,)
+        # PM06-R2-003: задание несёт версию расписания и исходное время запуска,
+        # чтобы устаревшее задание не могло опубликовать перенесённый пост.
+        assert job.args == (post.id, post.schedule_version, post.scheduled_at_utc)
         assert job.next_run_time == post.scheduled_at_utc
     finally:
         scheduler.shutdown()
@@ -244,13 +254,30 @@ async def test_e2e_reminder_creates_post_job_and_resets_fsm(
     fake_telegram.add_text_message("/start", chat_id=42, user_id=42)
     await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
     fake_telegram.add_photo_message("one", chat_id=42, user_id=42)
+    await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
+    # PM-03: после фото бот предлагает выбрать тип публикации.
+    fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=42, user_id=42)
     await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
     date = future_date_text()
+    # PM-05: дата показывает превью; публикация создаётся на подтверждении.
+    photos_before = len(fake_telegram.sent_photos)
     fake_telegram.add_text_message(date, chat_id=42, user_id=42)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+    await wait_until(lambda: len(fake_telegram.sent_photos) > photos_before)
+    await wait_for_state(running_app, 42, DialogState.WAITING_CONFIRMATION)
+    fake_telegram.add_callback_query(
+        latest_callback_data(fake_telegram, "pm05c:"), chat_id=42, user_id=42
+    )
+    await wait_until(
+        lambda: any(m["text"].startswith("✅ Принято!") for m in fake_telegram.sent_messages)
+    )
     await wait_for_state(running_app, 42, DialogState.IDLE)
-    assert fake_telegram.sent_messages[-1]["text"].startswith("✅ Принято!")
-    assert await draft_data(running_app, 42) == {}
+    # PM06-R2-002: маркер подтверждения остаётся в черновике, чтобы повторное
+    # нажатие кнопки не создавало дубликат. Сценарий при этом завершён (IDLE).
+    leftover = await draft_data(running_app, 42)
+    assert leftover["confirmed_post_id"]
+    assert leftover["confirmed_draft_id"] == leftover["draft_id"]
+    with sqlite3.connect(db_path(tmp_path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 1
     with sqlite3.connect(db_path(tmp_path)) as connection:
         rows = connection.execute(
             "SELECT id,user_id,telegram_file_id,telegram_file_unique_id,"
@@ -270,21 +297,32 @@ async def test_e2e_reminder_creates_post_job_and_resets_fsm(
         None,
     )
     job = running_app._scheduler._scheduler.get_job(f"post:{post_id}")
-    assert job is not None and job.args == (post_id,)
+    assert job is not None
     expected_utc = (
         datetime.strptime(date, "%d.%m.%Y %H:%M")
         .replace(tzinfo=ZoneInfo("Europe/Moscow"))
         .astimezone(UTC)
     )
+    # PM06-R2-003: задание привязано к версии расписания и исходному времени.
+    assert job.args[:2] == (post_id, 0)
+    assert job.args[2] == expected_utc
     assert scheduled.startswith(expected_utc.strftime("%Y-%m-%d %H:%M"))
 
     # Новая фотография после IDLE не использует старые file_id/дату.
     fake_telegram.add_photo_message("two", chat_id=42, user_id=42)
     await wait_until(lambda: len(fake_telegram.sent_messages) == 4)
-    await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
+    await wait_for_state(running_app, 42, DialogState.WAITING_PUBLICATION_TYPE)
     assert (await draft_data(running_app, 42))["telegram_file_id"] == "two"
+    fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=42, user_id=42)
+    await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
+    photos_before = len(fake_telegram.sent_photos)
     fake_telegram.add_text_message(date, chat_id=42, user_id=42)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 5)
+    await wait_until(lambda: len(fake_telegram.sent_photos) > photos_before)
+    await wait_for_state(running_app, 42, DialogState.WAITING_CONFIRMATION)
+    fake_telegram.add_callback_query(
+        latest_callback_data(fake_telegram, "pm05c:"), chat_id=42, user_id=42
+    )
+    await wait_for_state(running_app, 42, DialogState.IDLE)
     with sqlite3.connect(db_path(tmp_path)) as connection:
         assert connection.execute("SELECT telegram_file_id FROM posts ORDER BY id").fetchall() == [
             ("one",),
@@ -302,6 +340,14 @@ async def test_e2e_db_failure_keeps_photo_and_never_confirms(
     await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
     fake_telegram.add_photo_message("photo", chat_id=42, user_id=42)
     await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
+    fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=42, user_id=42)
+    await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
+    date = future_date_text()
+    photos_before = len(fake_telegram.sent_photos)
+    fake_telegram.add_text_message(date, chat_id=42, user_id=42)
+    await wait_until(lambda: len(fake_telegram.sent_photos) > photos_before)
+    await wait_for_state(running_app, 42, DialogState.WAITING_CONFIRMATION)
+    callback = latest_callback_data(fake_telegram, "pm05c:")
     original = PostRepository.create_post
 
     async def fail_db(self, **kwargs):
@@ -309,19 +355,18 @@ async def test_e2e_db_failure_keeps_photo_and_never_confirms(
 
     with monkeypatch.context() as scope:
         scope.setattr(PostRepository, "create_post", fail_db)
-        fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
-        await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+        fake_telegram.add_callback_query(callback, chat_id=42, user_id=42)
+        await wait_until(lambda: "сохранить" in fake_telegram.sent_messages[-1]["text"])
         assert "✅" not in fake_telegram.sent_messages[-1]["text"]
-        assert "сохранить" in fake_telegram.sent_messages[-1]["text"]
-        await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
+        # Черновик и состояние сохранены: пользователь может подтвердить ещё раз.
+        await wait_for_state(running_app, 42, DialogState.WAITING_CONFIRMATION)
         assert (await draft_data(running_app, 42))["telegram_file_id"] == "photo"
         with sqlite3.connect(db_path(tmp_path)) as connection:
             assert connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 0
         assert running_app._scheduler._scheduler.get_jobs() == []
     assert PostRepository.create_post is original
-    fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 4)
-    assert fake_telegram.sent_messages[-1]["text"].startswith("✅ Принято!")
+    fake_telegram.add_callback_query(callback, chat_id=42, user_id=42)
+    await wait_until(lambda: fake_telegram.sent_messages[-1]["text"].startswith("✅ Принято!"))
     await wait_for_state(running_app, 42, DialogState.IDLE)
 
 
@@ -335,23 +380,33 @@ async def test_e2e_scheduler_failure_keeps_post_and_avoids_duplicate_on_new_date
     await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
     fake_telegram.add_photo_message("photo", chat_id=42, user_id=42)
     await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
+    fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=42, user_id=42)
+    await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
+    date = future_date_text()
+    photos_before = len(fake_telegram.sent_photos)
+    fake_telegram.add_text_message(date, chat_id=42, user_id=42)
+    await wait_until(lambda: len(fake_telegram.sent_photos) > photos_before)
+    await wait_for_state(running_app, 42, DialogState.WAITING_CONFIRMATION)
+    callback = latest_callback_data(fake_telegram, "pm05c:")
 
-    def fail_scheduler(self, *, post_id, run_at):
+    def fail_scheduler(self, *, post_id, run_at, schedule_version=None):
         raise RuntimeError("scheduler unavailable")
 
     with monkeypatch.context() as scope:
         scope.setattr(SchedulerService, "schedule_post", fail_scheduler)
-        fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
-        await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+        fake_telegram.add_callback_query(callback, chat_id=42, user_id=42)
+        await wait_until(lambda: "сохранена" in fake_telegram.sent_messages[-1]["text"])
     assert "✅" not in fake_telegram.sent_messages[-1]["text"]
-    assert "сохранена" in fake_telegram.sent_messages[-1]["text"]
     await wait_for_state(running_app, 42, DialogState.IDLE)
-    assert await draft_data(running_app, 42) == {}
     with sqlite3.connect(db_path(tmp_path)) as connection:
         assert connection.execute("SELECT status FROM posts").fetchall() == [("PENDING",)]
     assert running_app._scheduler._scheduler.get_jobs() == []
-    fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 4)
+    # Новый сценарий с той же датой не создаёт вторую публикацию-дубликат
+    # на прежнем черновике: запись уже сохранена и помечена как подтверждённая.
+    fake_telegram.add_photo_message("photo-2", chat_id=42, user_id=42)
+    await wait_for_state(running_app, 42, DialogState.WAITING_PUBLICATION_TYPE)
+    fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=42, user_id=42)
+    await wait_for_state(running_app, 42, DialogState.WAITING_DATETIME)
     with sqlite3.connect(db_path(tmp_path)) as connection:
         assert connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 1
 
@@ -374,15 +429,25 @@ async def test_e2e_telegram_mode_persists_target_and_confirms_locally(
         await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
         fake_telegram.add_photo_message("telegram-photo", chat_id=42, user_id=42)
         await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
+        # PM-03: после фото выбирается тип публикации, затем вводится канал.
+        fake_telegram.add_text_message(TELEGRAM_BUTTON, chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_TARGET)
+        fake_telegram.add_text_message("-1001234567890", chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_DATETIME)
         date = (
             (datetime.now(UTC) + timedelta(days=2))
             .astimezone(ZoneInfo("Europe/Moscow"))
             .strftime("%d.%m.%Y %H:%M")
         )
+        photos_before = len(fake_telegram.sent_photos)
         fake_telegram.add_text_message(date, chat_id=42, user_id=42)
-        await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+        await wait_until(lambda: len(fake_telegram.sent_photos) > photos_before)
+        await wait_for_state(app, 42, DialogState.WAITING_CONFIRMATION)
+        fake_telegram.add_callback_query(
+            latest_callback_data(fake_telegram, "pm05c:"), chat_id=42, user_id=42
+        )
+        await wait_until(lambda: "✅ Запланировано!" in fake_telegram.sent_messages[-1]["text"])
         await wait_for_state(app, 42, DialogState.IDLE)
-        assert "✅ Запланировано!" in fake_telegram.sent_messages[-1]["text"]
         assert f"⏰ {date[-5:]}" in fake_telegram.sent_messages[-1]["text"]
         with sqlite3.connect(db_path(tmp_path)) as connection:
             post_id, kind, target = connection.execute(

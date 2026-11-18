@@ -25,7 +25,7 @@ from postmaster.services.cancel_service import (
     CancelService,
     PostNotFoundForUserError,
 )
-from postmaster.services.dialog_service import DialogService
+from postmaster.services.dialog_service import DialogOutcomeKind, DialogService
 from postmaster.services.user_service import UserService
 from postmaster.utils.logging_config import (
     EVENT_COMMAND_FAILED,
@@ -42,6 +42,7 @@ CANCEL_FAILED = "Не удалось отменить публикацию. По
 RESCHEDULE_PROMPT = "Укажи новую дату и время публикации в формате ДД.ММ.ГГГГ ЧЧ:ММ"
 RESCHEDULE_NOT_FOUND = "Публикация недоступна для переноса."
 RESCHEDULE_FAILED = "Не удалось начать перенос публикации. Попробуйте позже."
+FSM_CONFLICT = "Сейчас уже выполняется другой сценарий. Завершите его или отправьте /start."
 
 
 def register_post_actions_callbacks(
@@ -53,9 +54,7 @@ def register_post_actions_callbacks(
 ) -> None:
     """Регистрирует inline-callback handlers (PM-04 §4, §5)."""
 
-    @bot.callback_query_handler(
-        func=lambda c: bool(c.data) and c.data.startswith("cancel:")
-    )
+    @bot.callback_query_handler(func=lambda c: bool(c.data) and c.data.startswith("cancel:"))
     async def on_cancel(call: CallbackQuery) -> None:
         post_id = parse_cancel_callback(call.data or "")
         sender = call.from_user
@@ -111,9 +110,7 @@ def register_post_actions_callbacks(
         )
         await _answer_and_notify(call, bot, CANCEL_OK.format(post_id=post_id))
 
-    @bot.callback_query_handler(
-        func=lambda c: bool(c.data) and c.data.startswith("resched:")
-    )
+    @bot.callback_query_handler(func=lambda c: bool(c.data) and c.data.startswith("resched:"))
     async def on_reschedule(call: CallbackQuery) -> None:
         post_id = parse_reschedule_callback(call.data or "")
         sender = call.from_user
@@ -133,9 +130,15 @@ def register_post_actions_callbacks(
             return
 
         try:
-            await dialog_service.start_reschedule(
+            outcome = await dialog_service.start_reschedule(
                 sender.id, call.message.chat.id, post_id
             )
+            if outcome.kind == DialogOutcomeKind.FSM_CONFLICT:
+                await _answer_and_notify(call, bot, FSM_CONFLICT)
+                return
+            if outcome.kind == DialogOutcomeKind.RESCHEDULE_REJECTED:
+                await _answer_and_notify(call, bot, RESCHEDULE_NOT_FOUND)
+                return
         except Exception:
             log_event(
                 logger,
@@ -163,9 +166,10 @@ def register_post_actions_callbacks(
         await _answer_and_notify(call, bot, RESCHEDULE_PROMPT)
 
 
-async def _answer_and_notify(
-    call: CallbackQuery, bot: AsyncTeleBot, text: str
-) -> None:
+async def _answer_and_notify(call: CallbackQuery, bot: AsyncTeleBot, text: str) -> None:
     """Отправляет новое сообщение и отвечает на callback (снимает «часики»)."""
     await bot.send_message(call.message.chat.id, text)
-    await bot.answer_callback_query(call.id)
+    try:
+        await bot.answer_callback_query(call.id)
+    except Exception:
+        logger.debug("answer_callback_query failed", exc_info=True)

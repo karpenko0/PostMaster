@@ -38,6 +38,18 @@ class PostNotPendingError(RescheduleError):
     """Пост не найден среди PENDING пользователя (чужой, отсутствует или не PENDING)."""
 
 
+class SchedulerRescheduleError(RescheduleError):
+    """PM06-R2-003: БД обновлена, но задание Scheduler не зарегистрировано.
+
+    Не возвращать безусловный успех: вызывающий слой сообщает пользователю, что
+    задача будет восстановлена реконсиляцией, и не теряет новый post.
+    """
+
+    def __init__(self, post: Post) -> None:
+        self.post = post
+        super().__init__("задание Scheduler не зарегистрировано")
+
+
 class RescheduleService:
     """Переносит PENDING-публикацию пользователя на новое UTC-время (PM-04)."""
 
@@ -45,9 +57,13 @@ class RescheduleService:
         self,
         post_repository: PostRepository,
         scheduler: SchedulerJobRescheduler,
+        *,
+        strict_scheduler: bool = False,
     ) -> None:
         self._posts = post_repository
         self._scheduler = scheduler
+        # Production: ошибка регистрации задания не маскируется успехом.
+        self._strict_scheduler = strict_scheduler
 
     async def reschedule(
         self,
@@ -76,22 +92,34 @@ class RescheduleService:
                 post_id,
                 user_id,
             )
-            raise PostNotPendingError(
-                "публикация не найдена среди ваших ожидающих публикаций"
-            )
+            raise PostNotPendingError("публикация не найдена среди ваших ожидающих публикаций")
 
         # БД уже содержит новое время — ошибка Scheduler не должна возвращать
         # пост к прежнему расписанию (§6.1 SPEC-PM-04). Recovery при следующем
         # старте перерегистрирует задание по актуальному scheduled_at_utc.
         try:
             self._scheduler.schedule_post(
-                post_id=post.id, run_at=post.scheduled_at_utc
+                post_id=post.id,
+                run_at=post.scheduled_at_utc,
+                schedule_version=post.schedule_version,
             )
+        except TypeError:
+            # Совместимость с тестовыми/сторонними адаптерами старого контракта.
+            try:
+                self._scheduler.schedule_post(post_id=post.id, run_at=post.scheduled_at_utc)
+            except Exception:
+                if self._strict_scheduler:
+                    raise SchedulerRescheduleError(post) from None
+                logger.exception(
+                    "Scheduler reschedule failed post_id=%s (DB already updated)", post.id
+                )
         except Exception:
             logger.exception(
                 "Scheduler reschedule failed post_id=%s (DB already updated)",
                 post.id,
             )
+            if self._strict_scheduler:
+                raise SchedulerRescheduleError(post) from None
         logger.info(
             "Post rescheduled post_id=%s user_id=%s scheduled_at_utc=%s",
             post.id,

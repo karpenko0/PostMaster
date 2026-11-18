@@ -1,4 +1,6 @@
-"""Сценарий создания публикации через Long Polling и fake Telegram API (SPEC-003, SPEC-004, PM-03, PM-05).
+"""Сценарий создания публикации через Long Polling и fake Telegram API.
+
+Покрывает SPEC-003, SPEC-004, PM-03, PM-05.
 
 Проверяются переходы и ответы на каждом шаге, недопустимые сообщения и работа только в личных
 чатах. Шаг фото дополнительно проверяет метаданные в FSM (IT-004-01…IT-004-03), отсутствие
@@ -15,19 +17,22 @@ from harness import (
     db_snapshot,
     draft_data,
     future_date_text,
+    latest_callback_data,
     users_rows,
     wait_for_state,
     wait_until,
 )
 from postmaster.app import Application
 from postmaster.domain.dialog import DialogState
+
+# re-export обратной совместимости для старых тестов
 from postmaster.handlers.dialog import (
     HINT_BY_STATE,
     INVALID_FORMAT_TEXT,
+    PHOTO_ACCEPTED_TEXT,  # noqa: F401
     PUBLICATION_TYPE_PROMPT_TEXT,
     REMINDER_BUTTON,
 )
-from postmaster.handlers.dialog import PHOTO_ACCEPTED_TEXT  # re-export обратной совместимости
 
 IDLE = DialogState.IDLE
 WAITING_PHOTO = DialogState.WAITING_PHOTO
@@ -38,7 +43,9 @@ WAITING_CONFIRMATION = DialogState.WAITING_CONFIRMATION
 # Ответ §26 SPEC-004: бот просит фотографию вместо другого сообщения (AC-004-08, ERR-004-01).
 PHOTO_REQUEST_TEXT = "Отправь фотографию, которую нужно опубликовать."
 
-CONFIRM_CALLBACK_DATA = "pm05:confirm"
+# PM06-R2-001: кнопки привязаны к черновику, поэтому нажимается реальная кнопка
+# из последнего превью. Общие pm05:confirm/pm05:cancel теперь считаются устаревшими.
+CONFIRM_CALLBACK_PREFIX = "pm05c:"
 
 
 async def _start(app: Application, fake: FakeTelegram, user_id: int = 42) -> None:
@@ -67,7 +74,9 @@ async def _select_reminder(app: Application, fake: FakeTelegram) -> None:
 async def _confirm(app: Application, fake: FakeTelegram) -> None:
     """PM-05: нажать «✅ Подтвердить» в превью."""
     before = len(fake.sent_messages)
-    fake.add_callback_query(CONFIRM_CALLBACK_DATA, chat_id=42, user_id=42)
+    fake.add_callback_query(
+        latest_callback_data(fake, CONFIRM_CALLBACK_PREFIX), chat_id=42, user_id=42
+    )
     await wait_until(lambda: len(fake.sent_messages) >= before + 1)
     await wait_for_state(app, 42, IDLE)
 
@@ -94,7 +103,9 @@ async def test_full_scenario_creates_post_and_returns_to_idle(
     await wait_for_state(running_app, 42, WAITING_CONFIRMATION)
 
     before_confirm = len(fake_telegram.sent_messages)
-    fake_telegram.add_callback_query(CONFIRM_CALLBACK_DATA, chat_id=42, user_id=42)
+    fake_telegram.add_callback_query(
+        latest_callback_data(fake_telegram, CONFIRM_CALLBACK_PREFIX), chat_id=42, user_id=42
+    )
     await wait_until(lambda: len(fake_telegram.sent_messages) >= before_confirm + 1)
     created = fake_telegram.sent_messages[-1]["text"]
     assert created.startswith("✅ Принято!\n\nФото запланировано:")
@@ -142,11 +153,13 @@ async def test_photo_does_not_touch_database(
 ) -> None:
     # BR-004-08: фотография сама по себе не создаёт публикацию в БД (PM-05-BR-02).
     await _start(running_app, fake_telegram)
-    before = db_snapshot(db_path(tmp_path))
+    before = db_snapshot(db_path(tmp_path), tables=("users", "posts"))
 
     await _send_photo(running_app, fake_telegram, "photo-1")
 
-    assert db_snapshot(db_path(tmp_path)) == before
+    # dialog_states — служебная таблица FSM (PM06-R2-007): она меняется на каждом
+    # шаге, а BR-004-08 запрещает создание публикации в posts.
+    assert db_snapshot(db_path(tmp_path), tables=("users", "posts")) == before
 
 
 async def test_replies_never_show_file_identifiers(

@@ -62,6 +62,9 @@ class PostModel(Base):
         ),
         Index("ix_posts_user_status_scheduled", "user_id", "status", "scheduled_at_utc"),
         Index("ix_posts_status_scheduled", "status", "scheduled_at_utc"),
+        # PM06-R2-002: один черновик -> не более одной записи Post. NULL у старых
+        # записей разрешён (SQLite/PostgreSQL допускают несколько NULL в UNIQUE).
+        Index("uq_posts_source_draft_id", "source_draft_id", unique=True),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -82,3 +85,26 @@ class PostModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # PM06-R2-002: постоянный idempotency key черновика. NULL для записей,
+    # созданных до миграции (никакие данные не переписываются).
+    source_draft_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # PM06-R2-003: версия расписания. Увеличивается при переносе, чтобы устаревшее
+    # задание APScheduler не могло захватить пост с новым scheduled_at_utc.
+    schedule_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+
+class DialogStateModel(Base):
+    """PM06-R2-007: персистентное состояние FSM (state + draft в одной строке)."""
+
+    __tablename__ = "dialog_states"
+    __table_args__ = (Index("ix_dialog_states_expires_at", "expires_at"),)
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    draft_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

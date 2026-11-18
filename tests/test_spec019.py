@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from postmaster.domain.dialog import DialogState
+from postmaster.handlers.dialog import REMINDER_BUTTON
 from postmaster.handlers.help import HELP_TEXT, register_help_handler
 
 logger = logging.getLogger(__name__)
@@ -133,11 +134,15 @@ async def test_help_preserves_waiting_datetime_state(running_app, fake_telegram)
     )
     await wait_for_state(running_app, 700, DialogState.WAITING_PHOTO)
     fake_telegram.add_photo_message(file_id="photo-help-1", chat_id=700, user_id=700)
+    # PM-03: после фото бот спрашивает тип публикации — выбираем REMINDER.
+    await wait_for_state(running_app, 700, DialogState.WAITING_PUBLICATION_TYPE)
+    fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=700, user_id=700)
     await wait_for_state(running_app, 700, DialogState.WAITING_DATETIME)
 
-    # Отправляем /help
+    # Отправляем /help. Сообщений уже больше двух (фото + выбор типа + запрос даты),
+    # поэтому ждём появления именно справки.
     fake_telegram.add_text_message("/help", chat_id=700, user_id=700)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
+    await wait_until(lambda: any("📖" in m["text"] for m in fake_telegram.sent_messages))
 
     # FSM не изменился
     state = await running_app.bot.get_state(700, 700)
@@ -153,6 +158,8 @@ async def test_help_preserves_draft_data(running_app, fake_telegram) -> None:
     )
     await wait_for_state(running_app, 800, DialogState.WAITING_PHOTO)
     fake_telegram.add_photo_message(file_id="photo-help-draft", chat_id=800, user_id=800)
+    await wait_for_state(running_app, 800, DialogState.WAITING_PUBLICATION_TYPE)
+    fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=800, user_id=800)
     await wait_for_state(running_app, 800, DialogState.WAITING_DATETIME)
 
     # Проверяем, что draft_data содержит фото
@@ -161,7 +168,7 @@ async def test_help_preserves_draft_data(running_app, fake_telegram) -> None:
 
     # Отправляем /help
     fake_telegram.add_text_message("/help", chat_id=800, user_id=800)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
+    await wait_until(lambda: any("📖" in m["text"] for m in fake_telegram.sent_messages))
 
     # Draft не очищен
     draft_after = await draft_data(running_app, 800)
@@ -183,17 +190,21 @@ async def test_help_works_after_other_commands(running_app, fake_telegram) -> No
     """/help работает после других команд без перезапуска сценария."""
     from harness import wait_for_state, wait_until
 
-    # Регистрируем, загружаем фото, получаем WAITING_DATETIME
+    # Регистрируем, загружаем фото, выбираем тип — попадаем в WAITING_DATETIME.
     fake_telegram.add_text_message(
         "/start", chat_id=1000, user_id=1000, username=None, first_name="Тестер"
     )
     await wait_for_state(running_app, 1000, DialogState.WAITING_PHOTO)
     fake_telegram.add_photo_message(file_id="photo-1000", chat_id=1000, user_id=1000)
+    await wait_for_state(running_app, 1000, DialogState.WAITING_PUBLICATION_TYPE)
+    fake_telegram.add_text_message(REMINDER_BUTTON, chat_id=1000, user_id=1000)
     await wait_for_state(running_app, 1000, DialogState.WAITING_DATETIME)
 
     # /my_posts в этом состоянии
     fake_telegram.add_text_message("/my_posts", chat_id=1000, user_id=1000)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+    await wait_until(
+        lambda: any("нет запланированных" in m["text"] for m in fake_telegram.sent_messages)
+    )
 
     # Состояние не изменилось
     state = await running_app.bot.get_state(1000, 1000)
@@ -201,11 +212,8 @@ async def test_help_works_after_other_commands(running_app, fake_telegram) -> No
 
     # /help
     fake_telegram.add_text_message("/help", chat_id=1000, user_id=1000)
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 4)
+    await wait_until(lambda: fake_telegram.sent_messages[-1]["text"] == HELP_TEXT)
 
     # Состояние всё ещё не изменилось
     state = await running_app.bot.get_state(1000, 1000)
     assert state == DialogState.WAITING_DATETIME.value
-
-    help_message = fake_telegram.sent_messages[-1]
-    assert help_message["text"] == HELP_TEXT

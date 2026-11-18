@@ -4,7 +4,23 @@
 не меняет состояние (AC-02). Модуль не зависит от Telegram и базы данных.
 """
 
+import re
+import uuid
 from enum import StrEnum
+
+# PM06-R2-001: короткий идентификатор черновика для callback data Telegram.
+DRAFT_ID_LENGTH = 16
+_DRAFT_ID_PATTERN = re.compile(r"^[0-9a-f]{16}$", re.ASCII)
+
+
+def new_draft_id() -> str:
+    """Возвращает уникальный короткий идентификатор черновика (16 hex-символов)."""
+    return uuid.uuid4().hex[:DRAFT_ID_LENGTH]
+
+
+def is_valid_draft_id(value: str | None) -> bool:
+    """Проверяет формат идентификатора черновика, полученного из callback data."""
+    return isinstance(value, str) and _DRAFT_ID_PATTERN.fullmatch(value) is not None
 
 
 class DialogState(StrEnum):

@@ -43,7 +43,9 @@ class SchedulerRegistrationError(Exception):
 
 
 class PostScheduler(Protocol):
-    def schedule_post(self, *, post_id: int, run_at: datetime) -> None: ...
+    def schedule_post(
+        self, *, post_id: int, run_at: datetime, schedule_version: int | None = None
+    ) -> None: ...
 
 
 def _reject(code: PostCreationErrorCode, user_id: int | None) -> NoReturn:
@@ -97,8 +99,14 @@ class PostService:
         publication_type: PublicationType | str,
         target_id: str | None = None,
         caption: str | None = None,
+        source_draft_id: str | None = None,
     ) -> Post:
-        """Создаёт запись и задание; возвращает только сохранённый Post."""
+        """Создаёт запись и задание; возвращает только сохранённый Post.
+
+        PM06-R2-002: при ``source_draft_id`` создание идемпотентно на уровне БД —
+        повторный вызов (рестарт, параллельный callback, несколько процессов)
+        возвращает уже существующий Post, а не создаёт дубликат.
+        """
         logger.info("Post creation started user_id=%s", user_id)
         if self._repository is None or self._scheduler is None:
             raise RuntimeError("PostService требует репозиторий и Scheduler")
@@ -131,17 +139,23 @@ class PostService:
                 _reject(PostCreationErrorCode.INVALID_TARGET, user_id)
             if self._allowlist and target_id not in self._allowlist:
                 _reject(PostCreationErrorCode.TARGET_NOT_ALLOWED, user_id)
+        creation = {
+            "user_id": user_id,
+            "telegram_file_id": telegram_file_id,
+            "telegram_file_unique_id": telegram_file_unique_id,
+            "scheduled_at_utc": scheduled_at_utc,
+            "timezone": timezone,
+            "publication_type": kind,
+            "target_id": target_id,
+            "caption": caption,
+        }
         try:
-            post = await self._repository.create_post(
-                user_id=user_id,
-                telegram_file_id=telegram_file_id,
-                telegram_file_unique_id=telegram_file_unique_id,
-                scheduled_at_utc=scheduled_at_utc,
-                timezone=timezone,
-                publication_type=kind,
-                target_id=target_id,
-                caption=caption,
-            )
+            if source_draft_id:
+                post = await self._repository.create_post_idempotent(
+                    **creation, source_draft_id=source_draft_id
+                )
+            else:
+                post = await self._repository.create_post(**creation)
         except UserNotFoundError:
             logger.error("Post creation failed user_id=%s: user not found", user_id)
             raise PostCreationError(PostCreationErrorCode.USER_NOT_FOUND) from None
@@ -150,9 +164,23 @@ class PostService:
             logger.error("Post creation failed user_id=%s", user_id)
             raise PostCreationError(PostCreationErrorCode.POST_CREATE_FAILED) from None
         try:
-            self._scheduler.schedule_post(post_id=post.id, run_at=post.scheduled_at_utc)
+            try:
+                self._scheduler.schedule_post(
+                    post_id=post.id,
+                    run_at=post.scheduled_at_utc,
+                    schedule_version=post.schedule_version,
+                )
+            except TypeError:
+                # Legacy-адаптеры/тесты PM-05 принимают только post_id/run_at.
+                self._scheduler.schedule_post(post_id=post.id, run_at=post.scheduled_at_utc)
         except Exception:
             logger.error("Scheduler registration failed post_id=%s", post.id)
             raise SchedulerRegistrationError(post) from None
         logger.info("Post scheduled id=%s scheduled_at_utc=%s", post.id, post.scheduled_at_utc)
         return post
+
+    async def get_post(self, post_id: int) -> Post | None:
+        """Возвращает сохранённый Post по id (для идемпотентных повторов)."""
+        if self._repository is None:
+            return None
+        return await self._repository.get_by_id(post_id)

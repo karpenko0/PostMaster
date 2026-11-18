@@ -26,23 +26,44 @@ def test_empty_proxy_is_none(clean_env, value):
     assert Settings(bot_token=TEST_TOKEN, bot_proxy_url=value).bot_proxy_url is None
 
 
-@pytest.mark.parametrize("value", [
-    "socks5://127.0.0.1:1080", "socks5://u:p@127.0.0.1:1080",
-    "http://user:pass@host:8080", "http://[::1]:8080", "http://host:8080/",
-])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "socks5://127.0.0.1:1080",
+        "socks5://u:p@127.0.0.1:1080",
+        "http://user:pass@host:8080",
+        "http://[::1]:8080",
+        "http://host:8080/",
+    ],
+)
 def test_valid_proxy(clean_env, value):
     assert Settings(bot_token=TEST_TOKEN, bot_proxy_url=value).bot_proxy_url == value
 
 
-@pytest.mark.parametrize("value", [
-    "garbage", "socks4://host:1080", "https://host:8080", "http://:8080",
-    "http://host", "http://host:0", "http://host:65536", "http://host:abc",
-    "http://user:supersecret@:8080", "http://user:supersecret@host:80/path",
-    "http://user:supersecret@host:80?query", "http://user:supersecret@host:80#fragment",
-    "http://user@host:80", "socks5://user:@host:80", "http://host name:80",
-    "http://invalid!host:80", "socks5://" + "a" * 256 + ":secret@host:1080",
-    "http://user:supersecret@host:80\n", "http://host:80/%ZZ",
-])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "garbage",
+        "socks4://host:1080",
+        "https://host:8080",
+        "http://:8080",
+        "http://host",
+        "http://host:0",
+        "http://host:65536",
+        "http://host:abc",
+        "http://user:supersecret@:8080",
+        "http://user:supersecret@host:80/path",
+        "http://user:supersecret@host:80?query",
+        "http://user:supersecret@host:80#fragment",
+        "http://user@host:80",
+        "socks5://user:@host:80",
+        "http://host name:80",
+        "http://invalid!host:80",
+        "socks5://" + "a" * 256 + ":secret@host:1080",
+        "http://user:supersecret@host:80\n",
+        "http://host:80/%ZZ",
+    ],
+)
 def test_invalid_proxy_is_safe(clean_env, monkeypatch, value):
     monkeypatch.setenv("BOT_TOKEN", TEST_TOKEN)
     monkeypatch.setenv("BOT_PROXY_URL", value)
@@ -68,8 +89,9 @@ def test_secrets_hidden_and_redacted(clean_env):
     formatter = RedactingFormatter(secrets=settings.secret_values)
     assert "privateuser" not in formatter.format(record)
     assert "super%40secret" not in formatter.format(record)
-    message = _safe_error_message(ValueError("super@secret privateuser"), None, None,
-                                  settings.secret_values)
+    message = _safe_error_message(
+        ValueError("super@secret privateuser"), None, None, settings.secret_values
+    )
     assert "super@secret" not in message and "privateuser" not in message
 
 
@@ -97,8 +119,9 @@ class TunnelProxy:
                 lines = headers.split("\r\n")
                 method, address, _ = lines[0].split(" ")
                 assert method == "CONNECT"
-                self.authentications.append(next((x for x in lines if x.lower().startswith(
-                    "proxy-authorization:")), ""))
+                self.authentications.append(
+                    next((x for x in lines if x.lower().startswith("proxy-authorization:")), "")
+                )
                 host, port = address.rsplit(":", 1)
                 port = int(port)
             else:
@@ -141,8 +164,10 @@ class TunnelProxy:
                     dest.write(data)
                     await dest.drain()
 
-            pipes = [asyncio.create_task(copy(reader, upstream)),
-                     asyncio.create_task(copy(remote_reader, writer))]
+            pipes = [
+                asyncio.create_task(copy(reader, upstream)),
+                asyncio.create_task(copy(remote_reader, writer)),
+            ]
             try:
                 await asyncio.wait(pipes, return_when=asyncio.FIRST_COMPLETED)
             finally:
@@ -219,8 +244,11 @@ async def test_recreation_and_direct_mode(fake_telegram: FakeTelegram):
 
 
 async def test_application_wires_proxy(clean_env, tmp_path: Path):
-    settings = Settings(bot_token=TEST_TOKEN, bot_proxy_url="socks5://127.0.0.1:1080",
-                        database_url=f"sqlite+aiosqlite:///{tmp_path}/db.sqlite")
+    settings = Settings(
+        bot_token=TEST_TOKEN,
+        bot_proxy_url="socks5://127.0.0.1:1080",
+        database_url=f"sqlite+aiosqlite:///{tmp_path}/db.sqlite",
+    )
     app = Application.from_settings(settings)
     try:
         assert asyncio_helper.session_manager._proxy_url == settings.bot_proxy_url
@@ -229,7 +257,9 @@ async def test_application_wires_proxy(clean_env, tmp_path: Path):
 
 
 async def test_application_getme_polling_and_start_via_proxy(
-    clean_env, tmp_path: Path, fake_telegram: FakeTelegram,
+    clean_env,
+    tmp_path: Path,
+    fake_telegram: FakeTelegram,
 ):
     proxy = TunnelProxy("socks5", True)
     port = await proxy.start()

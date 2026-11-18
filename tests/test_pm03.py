@@ -1,5 +1,6 @@
 """Per-post publication selection and validation."""
 
+import asyncio
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -8,7 +9,14 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from fake_telegram import TEST_TOKEN, FakeTelegram
-from harness import db_path, future_date_text, wait_for_state, wait_until
+from harness import (
+    WAIT_SECONDS,
+    db_path,
+    future_date_text,
+    latest_callback_data,
+    wait_for_state,
+    wait_until,
+)
 from postmaster.app import Application
 from postmaster.config import Settings
 from postmaster.domain.dialog import DialogState
@@ -26,7 +34,10 @@ async def test_user_can_schedule_both_types(
     async def confirm():
         # PM-05: confirm создаёт публикацию и отвечает сообщением.
         before = len(fake_telegram.sent_messages)
-        fake_telegram.add_callback_query("pm05:confirm", chat_id=42, user_id=42)
+        # PM06-R2-001: нажимаем кнопку конкретного черновика из последнего превью.
+        fake_telegram.add_callback_query(
+            latest_callback_data(fake_telegram, "pm05c:"), chat_id=42, user_id=42
+        )
         await wait_until(lambda: len(fake_telegram.sent_messages) >= before + 1)
 
     await text("/start", 1)
@@ -95,6 +106,51 @@ async def test_user_can_schedule_both_types(
             ]
     finally:
         await restarted.stop()
+
+
+async def test_dialog_rejects_channel_outside_allowlist(
+    fake_telegram: FakeTelegram, tmp_path: Path
+) -> None:
+    """PM-03: канал вне `TELEGRAM_TARGET_ALLOWLIST` отклоняется на шаге ввода канала.
+
+    Проверка живёт в DialogService, поэтому allowlist обязан доходить до него из
+    настроек — иначе пользователь узнаёт об отказе только при подтверждении
+    и получает невнятное «Не удалось сохранить публикацию».
+    """
+    settings = Settings(
+        bot_token=TEST_TOKEN,
+        database_url=f"sqlite+aiosqlite:///{db_path(tmp_path)}",
+        log_level="INFO",
+        post_mode="TELEGRAM",
+        telegram_target_id="@allowedchannel",
+        telegram_target_allowlist="@allowedchannel",
+    )
+    app = Application.from_settings(settings)
+    task = asyncio.create_task(app.run())
+    try:
+        await asyncio.wait_for(fake_telegram.get_updates_called.wait(), timeout=WAIT_SECONDS)
+        fake_telegram.add_text_message("/start", chat_id=42, user_id=42)
+        # Фото отправляется только после входа в сценарий, иначе оно придёт в IDLE.
+        await wait_for_state(app, 42, DialogState.WAITING_PHOTO)
+        fake_telegram.add_photo_message("photo-allowlist", chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_PUBLICATION_TYPE)
+        fake_telegram.add_text_message(TELEGRAM_BUTTON, chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_TARGET)
+
+        before = len(fake_telegram.sent_messages)
+        fake_telegram.add_text_message("-1009999999999", chat_id=42, user_id=42)
+        await wait_until(lambda: len(fake_telegram.sent_messages) > before)
+        assert fake_telegram.sent_messages[-1]["text"] == (
+            "Этот канал не входит в список разрешённых. Укажите другой канал."
+        )
+        # Сценарий остаётся на шаге ввода канала — черновик не теряется.
+        assert await app.bot.get_state(42, 42) == DialogState.WAITING_TARGET
+
+        fake_telegram.add_text_message("@allowedchannel", chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_DATETIME)
+    finally:
+        await app.stop()
+        await asyncio.wait_for(task, timeout=WAIT_SECONDS)
 
 
 @pytest.mark.parametrize(

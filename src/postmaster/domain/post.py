@@ -73,6 +73,10 @@ class Post:
     error_message: str | None = None
     published_at: datetime | None = None
     caption: str | None = None
+    # PM06-R2-002/003: постоянный ключ идемпотентности и версия расписания.
+    # Значения по умолчанию сохраняют совместимость с тестами и кодом PM-01…PM-05.
+    source_draft_id: str | None = None
+    schedule_version: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, PostStatus) or not isinstance(
