@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fake_telegram import TEST_TOKEN, FakeTelegram
-from harness import db_path, future_date_text, wait_for_state, wait_until
+from harness import db_path, future_date_text, latest_callback_data, wait_for_state, wait_until
 from postmaster.app import Application
 from postmaster.config import Settings
 from postmaster.database.engine import create_database_engine, create_session_factory
@@ -20,8 +20,10 @@ from postmaster.database.schema import create_schema
 from postmaster.domain.dialog import DialogState
 from postmaster.domain.post import Post, PostStatus, PublicationType
 from postmaster.domain.user import User
+from postmaster.handlers.dialog import REMINDER_BUTTON, TELEGRAM_BUTTON
 from postmaster.publishers import (
     REMINDER_TEXT,
+    DefaultPublisherResolver,
     InvalidPublicationTypeError,
     Publisher,
     PublisherNotFoundError,
@@ -147,7 +149,9 @@ def test_err_016_02_invalid_publication_type_raises_invalid_publication_type(
     invalid_type: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     """ERR-016-02, §12, §21: некорректный тип публикации → INVALID_PUBLICATION_TYPE."""
-    resolver = PublisherResolver()
+    # Публичный алиас резолвера по умолчанию (SPEC-016 §2).
+    assert DefaultPublisherResolver is PublisherResolver
+    resolver = DefaultPublisherResolver()
 
     with caplog.at_level("ERROR", logger="postmaster.publishers.resolver"):
         with pytest.raises(InvalidPublicationTypeError) as exc_info:
@@ -418,11 +422,35 @@ async def test_e2e_27_scheduler_to_resolver_to_publisher_for_reminder_and_telegr
         await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
 
         fake_telegram.add_photo_message(f"photo-{post_mode}", chat_id=42, user_id=42)
+        await wait_for_state(app, 42, DialogState.WAITING_PUBLICATION_TYPE)
+        # PM-03: тип публикации выбирается явно; для TELEGRAM затем вводится канал.
+        fake_telegram.add_text_message(
+            REMINDER_BUTTON if post_mode == "REMINDER" else TELEGRAM_BUTTON,
+            chat_id=42,
+            user_id=42,
+        )
+        if post_mode == "TELEGRAM":
+            await wait_for_state(app, 42, DialogState.WAITING_TARGET)
+            fake_telegram.add_text_message(CHANNEL_ID, chat_id=42, user_id=42)
         await wait_for_state(app, 42, DialogState.WAITING_DATETIME)
 
+        photos_before = len(fake_telegram.sent_photos)
         fake_telegram.add_text_message(future_date_text(), chat_id=42, user_id=42)
-        await wait_until(lambda: len(fake_telegram.sent_messages) == 3)
+        await wait_until(lambda: len(fake_telegram.sent_photos) > photos_before)
+        await wait_for_state(app, 42, DialogState.WAITING_CONFIRMATION)
+        fake_telegram.add_callback_query(
+            latest_callback_data(fake_telegram, "pm05c:"), chat_id=42, user_id=42
+        )
         await wait_for_state(app, 42, DialogState.IDLE)
+        # Ответ на подтверждение отправляется уже после смены состояния, поэтому
+        # дожидаемся его, иначе оно попадёт в срез событий публикации.
+        confirmation_marker = "Принято" if post_mode == "REMINDER" else "Запланировано"
+        await wait_until(
+            lambda: any(
+                confirmation_marker in str(event.get("text", ""))
+                for event in fake_telegram.outbound_events
+            )
+        )
 
         with sqlite3.connect(db_path(tmp_path)) as conn:
             post_id, saved_type, status = conn.execute(
