@@ -192,6 +192,7 @@ class Application:
             telegram_client=telegram_client,
             user_repository=user_repository,
             secrets=settings.secret_values,
+            mark_text_sent=post_repository.mark_reminder_text_sent,
         )
         telegram_publisher = TelegramPublisher(
             telegram_client=telegram_client,

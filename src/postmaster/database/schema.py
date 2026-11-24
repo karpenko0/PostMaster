@@ -43,6 +43,10 @@ def _migrate_posts(sync_connection) -> None:
         sync_connection.execute(
             text("ALTER TABLE posts ADD COLUMN schedule_version INTEGER NOT NULL DEFAULT 0")
         )
+    if "reminder_text_sent" not in columns:
+        sync_connection.execute(
+            text("ALTER TABLE posts ADD COLUMN reminder_text_sent BOOLEAN NOT NULL DEFAULT FALSE")
+        )
     # NULL-значения старых записей не конфликтуют: UNIX/PostgreSQL UNIQUE это допускает.
     sync_connection.execute(
         text(

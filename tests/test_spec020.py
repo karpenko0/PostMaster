@@ -15,11 +15,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from harness import db_path
 from postmaster.database.engine import create_database_engine, create_session_factory
+from postmaster.database.models import PostModel, UserModel
 from postmaster.database.schema import create_schema
+from postmaster.domain.dialog import DialogState
 from postmaster.domain.post import Post, PostStatus, PublicationType
 from postmaster.publishers import DefaultPublisherResolver
 from postmaster.publishers.reminder_publisher import (
@@ -411,43 +414,38 @@ async def test_publication_no_caption_does_not_block(post_repo) -> None:
 # === E2E через Long Polling (SPEC-020 §3) ===
 
 
-async def test_caption_e2e_via_fake_telegram(running_app, fake_telegram, tmp_path: Path) -> None:
-    """Caption из Telegram доходит до БД и обратно через /my_posts."""
-    from harness import future_date_text, wait_until
+async def test_caption_e2e_via_fake_telegram(running_app, fake_telegram) -> None:
+    """Caption из Telegram сохраняется в БД после подтверждения предпросмотра."""
+    from harness import future_date_text, latest_callback_data, wait_for_state, wait_until
 
-    # Регистрируем пользователя
+    user_id = 500
+    caption = "E2E caption text"
     fake_telegram.add_text_message(
-        "/start", chat_id=500, user_id=500, username=None, first_name="Тестер"
+        "/start", chat_id=user_id, user_id=user_id, username=None, first_name="Тестер"
     )
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 1)
-
-    # Отправляем фото с caption
+    await wait_for_state(running_app, user_id, DialogState.WAITING_PHOTO)
     fake_telegram.add_photo_message(
-        file_id="caption-photo", chat_id=500, user_id=500, caption="E2E caption text"
+        file_id="caption-photo", chat_id=user_id, user_id=user_id, caption=caption
     )
-    await wait_until(lambda: len(fake_telegram.sent_messages) == 2)
-
-    # Отправляем дату
-    fake_telegram.add_text_message(
-        f"/skip_date\n{future_date_text(days=2)}", chat_id=500, user_id=500
+    await wait_for_state(running_app, user_id, DialogState.WAITING_PUBLICATION_TYPE)
+    fake_telegram.add_text_message("🔔 Напомнить мне", chat_id=user_id, user_id=user_id)
+    await wait_for_state(running_app, user_id, DialogState.WAITING_DATETIME)
+    fake_telegram.add_text_message(future_date_text(days=2), chat_id=user_id, user_id=user_id)
+    await wait_until(
+        lambda: any(photo["photo"] == "caption-photo" for photo in fake_telegram.sent_photos)
     )
+    callback = latest_callback_data(fake_telegram, "pm05c:")
+    fake_telegram.add_callback_query(callback, chat_id=user_id, user_id=user_id)
+    await wait_for_state(running_app, user_id, DialogState.IDLE)
 
-    # Ждём завершения публикации
-    async def post_with_caption_exists() -> bool:
-        from sqlalchemy.ext.asyncio import async_sessionmaker
-
-        from postmaster.database.models import PostModel
-
-        engine = running_app._engine
-        factory = async_sessionmaker(engine, expire_on_commit=False)
-        async with factory() as session:
-            from sqlalchemy import select
-
-            result = await session.execute(select(PostModel).where(PostModel.user_id == 1))
-            posts = list(result.scalars())
-            return bool(posts) and posts[0].caption == "E2E caption text"
-
-    await wait_until(post_with_caption_exists)
+    factory = create_session_factory(running_app._engine)
+    async with factory() as session:
+        result = await session.execute(
+            select(PostModel.caption)
+            .join(UserModel, PostModel.user_id == UserModel.id)
+            .where(UserModel.telegram_user_id == user_id)
+        )
+        assert result.scalar_one() == caption
 
 
 # === Helpers ===

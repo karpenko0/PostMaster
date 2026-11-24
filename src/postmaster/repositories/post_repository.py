@@ -72,6 +72,7 @@ def _to_domain(model: PostModel) -> Post:
         caption=model.caption,
         source_draft_id=model.source_draft_id,
         schedule_version=model.schedule_version or 0,
+        reminder_text_sent=model.reminder_text_sent,
     )
 
 
@@ -212,6 +213,35 @@ class PostRepository:
         )
         async with self._session_factory() as session:
             return [_to_domain(model) for model in (await session.scalars(statement)).all()]
+
+    async def recover_stale_processing(self, *, before: datetime) -> int:
+        """Возвращает просроченные захваты в очередь одним условным UPDATE."""
+        statement = (
+            update(PostModel)
+            .where(
+                PostModel.status == PostStatus.PROCESSING.value,
+                PostModel.updated_at <= _to_storage(before, "before"),
+            )
+            .values(status=PostStatus.PENDING.value)
+        )
+        async with self._session_factory.begin() as session:
+            result = await session.execute(statement)
+            return int(result.rowcount or 0)
+
+    async def mark_reminder_text_sent(self, post_id: int) -> bool:
+        """Фиксирует доставку текста перед отправкой фотографии."""
+        statement = (
+            update(PostModel)
+            .where(
+                PostModel.id == post_id,
+                PostModel.status == PostStatus.PROCESSING.value,
+                PostModel.publication_type == PublicationType.REMINDER.value,
+            )
+            .values(reminder_text_sent=True)
+        )
+        async with self._session_factory.begin() as session:
+            result = await session.execute(statement)
+            return result.rowcount == 1
 
     async def claim_for_processing(
         self, post_id: int, *, now: datetime | None = None

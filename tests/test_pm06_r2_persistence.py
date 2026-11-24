@@ -214,7 +214,8 @@ async def test_002_migration_of_existing_db_is_idempotent(tmp_path: Path) -> Non
             tables = {
                 row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
-        assert {"source_draft_id", "schedule_version"} <= columns
+        assert post.reminder_text_sent is False
+        assert {"source_draft_id", "schedule_version", "reminder_text_sent"} <= columns
         assert "uq_posts_source_draft_id" in indexes
         assert "dialog_states" in tables
     finally:
