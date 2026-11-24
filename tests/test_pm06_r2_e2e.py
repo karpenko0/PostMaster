@@ -6,7 +6,11 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
+import sqlite3
+from contextlib import closing
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -14,12 +18,25 @@ import pytest
 from telebot import asyncio_helper
 
 from fake_telegram import TEST_TOKEN, FakeTelegram
-from harness import db_path, draft_data, future_date_text, wait_for_state, wait_until
+from harness import (
+    db_path,
+    draft_data,
+    future_date_text,
+    latest_callback_data,
+    wait_for_state,
+    wait_until,
+)
 from postmaster.app import Application
 from postmaster.bot.factory import close_bot_session, create_bot
 from postmaster.config import Settings
+from postmaster.database.engine import create_session_factory
 from postmaster.domain.dialog import DialogState
+from postmaster.domain.post import PublicationType
+from postmaster.publishers.reminder import REMINDER_TEXT
+from postmaster.repositories.post_repository import PostRepository
 from postmaster.services.dialog_service import DRAFT_ID_KEY
+from postmaster.services.scheduler_service import PROCESSING_STALE_AFTER
+from postmaster.utils.clock import utc_now
 
 USER_TG = 42
 CHAT = 42
@@ -33,19 +50,6 @@ def _buttons(markup: dict) -> list[str]:
     ]
 
 
-def _latest_confirm_callback(fake: FakeTelegram) -> str:
-    markups = [item["reply_markup"] for item in fake.sent_inline_markups]
-    assert markups, "превью с клавиатурой не отправлено"
-    data = _buttons(markups[-1])
-    return next(value for value in data if value.startswith("pm05c:"))
-
-
-def _latest_cancel_callback(fake: FakeTelegram) -> str:
-    markups = [item["reply_markup"] for item in fake.sent_inline_markups]
-    data = _buttons(markups[-1])
-    return next(value for value in data if value.startswith("pm05x:"))
-
-
 async def _drive_to_preview(
     app: Application, fake: FakeTelegram, *, caption: str | None = None
 ) -> None:
@@ -57,7 +61,13 @@ async def _drive_to_preview(
     await wait_for_state(app, USER_TG, DialogState.WAITING_DATETIME)
     before = len(fake.sent_inline_markups)
     fake.add_text_message(future_date_text(days=2), chat_id=CHAT, user_id=USER_TG)
-    await wait_until(lambda: len(fake.sent_inline_markups) > before)
+    await wait_until(
+        lambda: any(
+            button.startswith("pm05c:")
+            for item in fake.sent_inline_markups[before:]
+            for button in _buttons(item["reply_markup"])
+        )
+    )
     await wait_for_state(app, USER_TG, DialogState.WAITING_CONFIRMATION)
 
 
@@ -68,10 +78,10 @@ async def test_001_e2e_old_button_does_not_confirm_new_draft(
     running_app: Application, fake_telegram: FakeTelegram, tmp_path: Path
 ) -> None:
     await _drive_to_preview(running_app, fake_telegram)
-    old_callback = _latest_confirm_callback(fake_telegram)
+    old_callback = latest_callback_data(fake_telegram, "pm05c:")
 
     await _drive_to_preview(running_app, fake_telegram)
-    fresh_callback = _latest_confirm_callback(fake_telegram)
+    fresh_callback = latest_callback_data(fake_telegram, "pm05c:")
     assert fresh_callback != old_callback
 
     before = len(fake_telegram.sent_messages)
@@ -97,21 +107,17 @@ async def test_004_e2e_preview_has_no_markdown_and_falls_back(
 ) -> None:
     caption = "*жирный* _курсив_ [link] `code` 😀🎯"
     fake_telegram.fail_send_photo = (400, "Bad Request: wrong file identifier")
-    fake_telegram.add_text_message("/start", chat_id=CHAT, user_id=USER_TG)
-    await wait_for_state(running_app, USER_TG, DialogState.WAITING_PHOTO)
-    fake_telegram.add_photo_message("pm06-photo", chat_id=CHAT, user_id=USER_TG, caption=caption)
-    await wait_for_state(running_app, USER_TG, DialogState.WAITING_PUBLICATION_TYPE)
-    fake_telegram.add_text_message("🔔 Напомнить мне", chat_id=CHAT, user_id=USER_TG)
-    await wait_for_state(running_app, USER_TG, DialogState.WAITING_DATETIME)
-    before = len(fake_telegram.sent_inline_markups)
-    fake_telegram.add_text_message(future_date_text(days=2), chat_id=CHAT, user_id=USER_TG)
-    await wait_until(lambda: len(fake_telegram.sent_inline_markups) > before)
+    await _drive_to_preview(running_app, fake_telegram, caption=caption)
 
-    preview_params = fake_telegram.sent_message_params[-1]
+    callback = latest_callback_data(fake_telegram, "pm05c:")
+    preview_params = next(
+        params
+        for params in fake_telegram.sent_message_params
+        if callback in _buttons(json.loads(params.get("reply_markup") or "{}"))
+    )
     assert "parse_mode" not in preview_params
     assert "*жирный*" in preview_params["text"]
     assert "**" not in preview_params["text"]
-    assert fake_telegram.sent_inline_markups[-1]["reply_markup"]["inline_keyboard"]
     draft = await draft_data(running_app, USER_TG)
     assert draft[DRAFT_ID_KEY]
     assert caption in draft.get("caption", "")
@@ -134,7 +140,7 @@ async def test_006_e2e_stale_callback_keeps_keyboard_and_answers_separately(
 
     before_answers = len(fake_telegram.answered_callbacks)
     fake_telegram.add_callback_query(
-        _latest_confirm_callback(fake_telegram), chat_id=CHAT, user_id=USER_TG
+        latest_callback_data(fake_telegram, "pm05c:"), chat_id=CHAT, user_id=USER_TG
     )
     await wait_until(lambda: len(fake_telegram.answered_callbacks) > before_answers)
     await wait_for_state(running_app, USER_TG, DialogState.IDLE)
@@ -160,7 +166,7 @@ async def test_006_e2e_recoverable_error_keeps_buttons(
     post_service.create_scheduled_post = failing_once  # type: ignore[method-assign]
     before = len(fake_telegram.sent_messages)
     fake_telegram.add_callback_query(
-        _latest_confirm_callback(fake_telegram), chat_id=CHAT, user_id=USER_TG
+        latest_callback_data(fake_telegram, "pm05c:"), chat_id=CHAT, user_id=USER_TG
     )
     await wait_until(lambda: len(fake_telegram.sent_messages) > before)
     assert len(fake_telegram.edited_markups) == 0
@@ -169,7 +175,7 @@ async def test_006_e2e_recoverable_error_keeps_buttons(
 
     before = len(fake_telegram.sent_messages)
     fake_telegram.add_callback_query(
-        _latest_confirm_callback(fake_telegram), chat_id=CHAT, user_id=USER_TG
+        latest_callback_data(fake_telegram, "pm05c:"), chat_id=CHAT, user_id=USER_TG
     )
     await wait_until(lambda: len(fake_telegram.sent_messages) > before)
     await wait_for_state(running_app, USER_TG, DialogState.IDLE)
@@ -182,7 +188,7 @@ async def test_006_e2e_answer_callback_failure_does_not_create_duplicates(
     running_app: Application, fake_telegram: FakeTelegram, tmp_path: Path
 ) -> None:
     await _drive_to_preview(running_app, fake_telegram)
-    callback = _latest_confirm_callback(fake_telegram)
+    callback = latest_callback_data(fake_telegram, "pm05c:")
     fake_telegram.fail_answer_callback = (500, "Internal Server Error")
     before = len(fake_telegram.sent_messages)
     fake_telegram.add_callback_query(callback, chat_id=CHAT, user_id=USER_TG)
@@ -205,7 +211,7 @@ async def test_007_e2e_fsm_survives_restart(
     await _drive_to_preview(running_app, fake_telegram)
     draft = await draft_data(running_app, USER_TG)
     draft_id = draft[DRAFT_ID_KEY]
-    callback = _latest_confirm_callback(fake_telegram)
+    callback = latest_callback_data(fake_telegram, "pm05c:")
 
     restarted = Application.from_settings(
         Settings(
@@ -304,3 +310,98 @@ def test_009_docker_compose_passes_proxy_from_env() -> None:
     example = Path(".env.example").read_text(encoding="utf-8")
     assert "BOT_PROXY_URL" in compose
     assert "BOT_PROXY_URL" in example
+
+
+@pytest.mark.parametrize("publication_type", list(PublicationType))
+async def test_scheduler_retries_temporary_photo_failure(
+    running_app: Application,
+    fake_telegram: FakeTelegram,
+    tmp_path: Path,
+    publication_type: PublicationType,
+) -> None:
+    fake_telegram.add_text_message("/start", chat_id=CHAT, user_id=USER_TG)
+    await wait_for_state(running_app, USER_TG, DialogState.WAITING_PHOTO)
+
+    database = db_path(tmp_path)
+    with closing(sqlite3.connect(database)) as connection:
+        user_id = connection.execute(
+            "SELECT id FROM users WHERE telegram_user_id = ?", (USER_TG,)
+        ).fetchone()[0]
+
+    is_reminder = publication_type == PublicationType.REMINDER
+    target_id = None if is_reminder else "-1001234567890"
+    fake_telegram.fail_send_photo = (500, "Internal Server Error")
+    post = await running_app._dialog_service._posts.create_scheduled_post(
+        user_id=user_id,
+        telegram_file_id="retry-photo",
+        telegram_file_unique_id="retry-photo-unique",
+        scheduled_at_utc=utc_now() + timedelta(milliseconds=250),
+        timezone="UTC",
+        publication_type=publication_type,
+        target_id=target_id,
+        caption="Caption",
+    )
+
+    def post_state() -> tuple[str, str | None, bool]:
+        with closing(sqlite3.connect(database)) as connection:
+            status, error, text_sent = connection.execute(
+                "SELECT status, error_message, reminder_text_sent FROM posts WHERE id = ?",
+                (post.id,),
+            ).fetchone()
+        return status, error, bool(text_sent)
+
+    await wait_until(lambda: post_state()[0] == "PENDING" and post_state()[1] is not None)
+    assert post_state()[2] is is_reminder
+    fake_telegram.fail_send_photo = None
+    assert await running_app._scheduler.reconcile_pending() == 1
+    await wait_until(lambda: post_state()[0] == "PUBLISHED")
+    assert await running_app._scheduler.reconcile_pending() == 0
+    assert fake_telegram.sent_photos == [
+        {"chat_id": target_id or str(CHAT), "photo": "retry-photo", "caption": "Caption"}
+    ]
+    assert sum(message["text"] == REMINDER_TEXT for message in fake_telegram.sent_messages) == (
+        1 if is_reminder else 0
+    )
+
+
+async def test_scheduler_resumes_only_stale_processing(
+    running_app: Application, fake_telegram: FakeTelegram, tmp_path: Path
+) -> None:
+    fake_telegram.add_text_message("/start", chat_id=CHAT, user_id=USER_TG)
+    await wait_for_state(running_app, USER_TG, DialogState.WAITING_PHOTO)
+
+    database = db_path(tmp_path)
+    with closing(sqlite3.connect(database)) as connection:
+        user_id = connection.execute(
+            "SELECT id FROM users WHERE telegram_user_id = ?", (USER_TG,)
+        ).fetchone()[0]
+
+    repo = PostRepository(create_session_factory(running_app._engine))
+    now = utc_now()
+    claimed_posts = []
+    for file_id, claim_time in (
+        ("interrupted", now - PROCESSING_STALE_AFTER - timedelta(seconds=1)),
+        ("active", now),
+    ):
+        post = await repo.create_post(
+            user_id=user_id,
+            telegram_file_id=file_id,
+            telegram_file_unique_id=file_id,
+            scheduled_at_utc=claim_time,
+            timezone="UTC",
+            publication_type=PublicationType.TELEGRAM,
+            target_id="-1001234567890",
+        )
+        assert await repo.claim_post_for_processing(post.id, now=claim_time)
+        claimed_posts.append(post)
+
+    assert await running_app._scheduler.reconcile_pending(now=now) == 1
+
+    def statuses() -> dict[int, str]:
+        with closing(sqlite3.connect(database)) as connection:
+            return dict(connection.execute("SELECT id, status FROM posts"))
+
+    interrupted, active = claimed_posts
+    await wait_until(lambda: statuses()[interrupted.id] == "PUBLISHED")
+    assert statuses()[active.id] == "PROCESSING"
+    assert [photo["photo"] for photo in fake_telegram.sent_photos] == ["interrupted"]

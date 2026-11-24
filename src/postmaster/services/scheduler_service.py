@@ -18,6 +18,7 @@ from typing import Any, Protocol
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from postmaster.repositories.post_repository import PostRepository
+from postmaster.utils.clock import utc_now
 from postmaster.utils.logging_config import (
     EVENT_SCHEDULER_JOB_ADDED,
     EVENT_SCHEDULER_JOB_REMOVED,
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 JOB_ID_PREFIX = "post:"
 RECONCILE_INTERVAL_SECONDS = 30
+# Дольше максимального времени отправки, чтобы не забрать активную публикацию.
+PROCESSING_STALE_AFTER = timedelta(minutes=5)
 
 
 class PostExecutionService(Protocol):
@@ -54,10 +57,6 @@ class SchedulerService:
         # Совместимость со SPEC-010/011: адаптер с методом publish(post_id).
         self._publication_executor = publication_executor
         self._reconcile_interval = reconcile_interval_seconds
-        # Одна регистрация просроченного PENDING-поста: APScheduler удаляет
-        # одноразовую date-задачу после срабатывания, повторная постановка создала
-        # бы лишнее срабатывание. Recovery обрабатывает такие посты отдельно.
-        self._reconciled: dict[int, tuple[int, datetime]] = {}
 
     def schedule_post(
         self,
@@ -85,7 +84,6 @@ class SchedulerService:
             args = (post_id,)
         else:
             args = (post_id, int(schedule_version), moment)
-            self._reconciled[post_id] = (int(schedule_version), moment)
         self._scheduler.add_job(
             self._on_post_due,
             trigger="date",
@@ -107,7 +105,6 @@ class SchedulerService:
 
     def remove_job(self, post_id: int) -> bool:
         """Удаляет задание поста из Scheduler. Возвращает True, если задание было."""
-        self._reconciled.pop(post_id, None)
         if not self.running:
             logger.info("Scheduler не запущен, задание не удалено post_id=%s", post_id)
             return False
@@ -166,13 +163,14 @@ class SchedulerService:
         )
 
     async def reconcile_pending(self, *, now: datetime | None = None) -> int:
-        """Сверяет PENDING-посты БД с заданиями APScheduler без рестарта.
-
-        Возвращает число изменённых заданий. Просроченные посты регистрируются с
-        run_date=now, чтобы существующий Recovery/MissedPostHandler обработал их.
-        """
+        """Восстанавливает просроченные захваты и отсутствующие задания."""
         if self._posts is None or not self.running:
             return 0
+        recovered = await self._posts.recover_stale_processing(
+            before=(now or utc_now()) - PROCESSING_STALE_AFTER
+        )
+        if recovered:
+            logger.warning("Scheduler recovered %s interrupted publications", recovered)
         posts = await self._posts.list_pending()
         jobs = {
             job.id: job
@@ -180,20 +178,14 @@ class SchedulerService:
             if job.id and job.id.startswith(JOB_ID_PREFIX)
         }
         changes = 0
-        active: set[int] = set()
         for post in posts:
-            active.add(post.id)
             job_id = f"{JOB_ID_PREFIX}{post.id}"
             # APScheduler сам немедленно исполнит просроченную date-задачу;
             # подмена run_at на now скрыла бы исходное расписание и усложнила
             # проверку stale-job. Recovery/overdue-посты сохраняют поведение.
             run_at = post.scheduled_at_utc
             expected_args = (post.id, post.schedule_version, run_at)
-            expected_marker = (post.schedule_version, run_at)
             job = jobs.pop(job_id, None)
-            if job is None and self._reconciled.get(post.id) == expected_marker:
-                # Одноразовое задание уже исполнено/снято как просроченное.
-                continue
             if job is None or tuple(job.args or ()) != expected_args:
                 self.schedule_post(
                     post_id=post.id,
@@ -201,10 +193,6 @@ class SchedulerService:
                     schedule_version=post.schedule_version,
                 )
                 changes += 1
-            else:
-                self._reconciled[post.id] = expected_marker
-        for post_id in set(self._reconciled) - active:
-            self._reconciled.pop(post_id, None)
         for stale_job_id in jobs:
             try:
                 self._scheduler.remove_job(stale_job_id)

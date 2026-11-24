@@ -86,6 +86,7 @@ async def test_schema_has_all_fields_constraints_fk_and_indexes(db) -> None:
         # PM06-R2-002/003: постоянный idempotency key черновика и версия расписания.
         "source_draft_id",
         "schedule_version",
+        "reminder_text_sent",
     }
     for name, expected_type in {
         "id": "INTEGER",
@@ -104,6 +105,7 @@ async def test_schema_has_all_fields_constraints_fk_and_indexes(db) -> None:
         "caption": "TEXT",
         "source_draft_id": "VARCHAR(64)",
         "schedule_version": "INTEGER",
+        "reminder_text_sent": "BOOLEAN",
     }.items():
         assert fields[name][2].upper() == expected_type
         # nullable: старые поля + новые PM06-R2-поля (в legacy-БД их нет).

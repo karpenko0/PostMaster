@@ -7,7 +7,7 @@
 
 import inspect
 import logging
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -95,6 +95,7 @@ class ReminderPublisher(Publisher):
         user_repository: UserLookup | Any,
         *,
         secrets: Iterable[str] = (),
+        mark_text_sent: Callable[[int], Awaitable[bool]] | None = None,
     ) -> None:
         # Поддерживаем оба порядка позиционных аргументов: (client, repo) и (repo, client).
         if hasattr(telegram_client, "get_by_id") and not hasattr(telegram_client, "send_message"):
@@ -106,6 +107,7 @@ class ReminderPublisher(Publisher):
         )
         self._users = user_repository
         self._secrets = tuple(secrets)
+        self._mark_text_sent = mark_text_sent
 
     async def publish(self, post: Any) -> PublishResult:
         """Выполняет отправку напоминания и фото, возвращая PublishResult (SPEC-014 §13–15)."""
@@ -145,15 +147,19 @@ class ReminderPublisher(Publisher):
             )
 
         caption = getattr(post, "caption", None)
-        try:
-            await _maybe_await(self._client.send_message(chat_id, REMINDER_TEXT))
-        except Exception as exc:
-            return self._fail(
-                post_id,
-                ReminderErrorCode.MESSAGE_SEND_FAILED,
-                _safe_error_message(exc, file_id, caption, self._secrets),
-                retryable=_is_temporary_telegram_error(exc),
-            )
+        if not getattr(post, "reminder_text_sent", False):
+            try:
+                await _maybe_await(self._client.send_message(chat_id, REMINDER_TEXT))
+            except Exception as exc:
+                return self._fail(
+                    post_id,
+                    ReminderErrorCode.MESSAGE_SEND_FAILED,
+                    _safe_error_message(exc, file_id, caption, self._secrets),
+                    retryable=_is_temporary_telegram_error(exc),
+                )
+
+            if self._mark_text_sent is not None and not await self._mark_text_sent(post_id):
+                raise RuntimeError("Не удалось зафиксировать доставку текста напоминания")
 
         try:
             if caption is not None:

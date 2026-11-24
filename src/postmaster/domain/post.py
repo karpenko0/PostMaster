@@ -77,6 +77,7 @@ class Post:
     # Значения по умолчанию сохраняют совместимость с тестами и кодом PM-01…PM-05.
     source_draft_id: str | None = None
     schedule_version: int = 0
+    reminder_text_sent: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, PostStatus) or not isinstance(

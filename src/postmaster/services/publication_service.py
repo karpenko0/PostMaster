@@ -46,6 +46,7 @@ from postmaster.utils.logging_config import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_RETRY_DELAYS = (30, 120, 600)
+PUBLICATION_TIMEOUT_SECONDS = 120
 
 
 class PublicationError(Exception):
@@ -183,10 +184,14 @@ class PublicationService:
             )
             return False
 
+        deadline = asyncio.timeout(PUBLICATION_TIMEOUT_SECONDS)
         try:
             publisher = self._resolve_publisher(post)
-            result = await publisher.publish(post)
+            async with deadline:
+                result = await publisher.publish(post)
         except Exception as exc:
+            if isinstance(exc, TimeoutError) and deadline.expired():
+                exc = TemporaryPublicationError("Истекло время отправки публикации")
             await self._handle_publish_error(post_id, exc)
             return False
 
